@@ -1,0 +1,69 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0b0a08;
+  --foreground: #f4efe4;
+  --muted: #b8ad99;
+  --panel: #14110e;
+  --panel-strong: #1d1812;
+  --line: #33291e;
+  --brass: #d6ad5f;
+  --verde: #153f36;
+  --claret: #782f3d;
+  --stone: #d8cbb6;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+}
+
+button,
+a {
+  outline-color: var(--brass);
+}
+
+.app-shell {
+  min-height: 100vh;
+  background:
+    linear-gradient(115deg, rgba(21, 63, 54, 0.34), transparent 34%),
+    linear-gradient(245deg, rgba(120, 47, 61, 0.24), transparent 31%),
+    radial-gradient(circle at top, rgba(216, 203, 182, 0.08), transparent 34%),
+    var(--background);
+}
+
+.fine-grid {
+  background-image:
+    linear-gradient(rgba(216, 203, 182, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(216, 203, 182, 0.05) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.grain {
+  position: relative;
+}
+
+.grain::before {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  opacity: 0.16;
+  background-image:
+    repeating-linear-gradient(
+      0deg,
+      rgba(255, 255, 255, 0.04) 0,
+      rgba(255, 255, 255, 0.04) 1px,
+      transparent 1px,
+      transparent 5px
+    );
+  mix-blend-mode: overlay;
+}

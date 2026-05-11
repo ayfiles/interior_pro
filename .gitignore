@@ -1,0 +1,11 @@
+.env
+.env.*
+!.env.example
+node_modules
+.turbo
+.next
+dist
+coverage
+dev-server*.log
+*.tsbuildinfo
+supabase/.temp/
