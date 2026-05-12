@@ -77,6 +77,7 @@ interface Database {
           credit_reservation_id: string | null;
           customer_name: string;
           id: string;
+          music_genre: string;
           organization_id: string;
           special_notes: string | null;
           status: string;

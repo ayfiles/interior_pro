@@ -28,6 +28,7 @@ interface ProjectRow {
   customer_name: string;
   error_message: string | null;
   id: string;
+  music_genre: string;
   organization_id: string;
   special_notes: string | null;
   status: string;
@@ -68,7 +69,7 @@ export default async function ProjectPage({
   const { data: project } = await supabase
     .from("projects")
     .select(
-      "id, organization_id, customer_name, status, voice_selection, special_notes, error_message, created_at",
+      "id, organization_id, customer_name, status, voice_selection, music_genre, special_notes, error_message, created_at",
     )
     .eq("id", id)
     .eq("organization_id", organization.id)
@@ -255,8 +256,12 @@ export default async function ProjectPage({
                   </span>
                 </div>
                 <div className="flex items-center justify-between border-b border-white/10 pb-3">
-                  <span className="text-[var(--muted)]">Voice</span>
+                  <span className="text-[var(--muted)]">Voice director</span>
                   <span>{statusLabel(typedProject.voice_selection)}</span>
+                </div>
+                <div className="flex items-center justify-between border-b border-white/10 pb-3">
+                  <span className="text-[var(--muted)]">Music type</span>
+                  <span>{statusLabel(typedProject.music_genre)}</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-[var(--muted)]">Created</span>

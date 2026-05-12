@@ -29,6 +29,52 @@ const ALLOWED_IMAGE_TYPES = new Set([
 
 const MAX_IMAGE_BYTES = 50 * 1024 * 1024;
 
+const VOICE_DIRECTORS = [
+  {
+    label: "Amelie - warm premium",
+    value: "speaker_amelie",
+  },
+  {
+    label: "Felix - confident showroom",
+    value: "speaker_felix",
+  },
+  {
+    label: "Mara - calm architectural",
+    value: "speaker_mara",
+  },
+  {
+    label: "Jonas - clear sales lead",
+    value: "speaker_jonas",
+  },
+] as const;
+
+const MUSIC_GENRES = [
+  {
+    label: "Cinematic ambient",
+    value: "cinematic_ambient",
+  },
+  {
+    label: "Modern luxury",
+    value: "modern_luxury",
+  },
+  {
+    label: "Minimal piano",
+    value: "minimal_piano",
+  },
+  {
+    label: "Lounge downtempo",
+    value: "lounge_downtempo",
+  },
+  {
+    label: "Soft electronic",
+    value: "soft_electronic",
+  },
+  {
+    label: "No music",
+    value: "no_music",
+  },
+] as const;
+
 type ToastKind = "error" | "info" | "success";
 
 interface ToastState {
@@ -158,6 +204,7 @@ export function NewProjectForm({
     const formData = new FormData(form);
     const customerName = String(formData.get("customerName") ?? "").trim();
     const voiceSelection = String(formData.get("voiceSelection") ?? "").trim();
+    const musicGenre = String(formData.get("musicGenre") ?? "").trim();
     const specialNotes = String(formData.get("specialNotes") ?? "").trim();
     const images = selectedFiles.filter((file) => file.size > 0);
     const validationError = validateImages(images);
@@ -214,9 +261,10 @@ export function NewProjectForm({
         customer_name: customerName,
         id: projectId,
         organization_id: organizationId,
+        music_genre: musicGenre || "cinematic_ambient",
         special_notes: specialNotes || null,
         status: "draft",
-        voice_selection: voiceSelection || "warm_editorial",
+        voice_selection: voiceSelection || "speaker_amelie",
       });
 
       if (projectError) {
@@ -290,6 +338,8 @@ export function NewProjectForm({
         metadata: {
           imageEnhancement: "nano-banana-pro",
           imageToVideo: "kling-3.0",
+          musicGenre: musicGenre || "cinematic_ambient",
+          voiceSelection: voiceSelection || "speaker_amelie",
         },
         project_id: projectId,
         status: "completed",
@@ -401,46 +451,64 @@ export function NewProjectForm({
 
         <div className="grid gap-5 md:grid-cols-2">
           <label className="block">
-            <span className="text-sm text-[var(--muted)]">Voice direction</span>
+            <span className="text-sm text-[var(--muted)]">Voice director</span>
             <select
               className="mt-2 h-12 w-full rounded-md border border-[var(--line)] bg-black/25 px-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--brass)]"
-              defaultValue="warm_editorial"
+              defaultValue="speaker_amelie"
               disabled={isSubmitting}
               name="voiceSelection"
               required
             >
-              <option value="warm_editorial">Warm editorial</option>
-              <option value="quiet_luxury">Quiet luxury</option>
-              <option value="architectural">Architectural</option>
-              <option value="showroom_director">Showroom director</option>
+              {VOICE_DIRECTORS.map((speaker) => (
+                <option key={speaker.value} value={speaker.value}>
+                  {speaker.label}
+                </option>
+              ))}
             </select>
           </label>
 
           <label className="block">
-            <span className="text-sm text-[var(--muted)]">Source images</span>
-            <input
-              accept="image/jpeg,image/png,image/webp,image/heic"
-              className="mt-2 block h-12 w-full cursor-pointer rounded-md border border-[var(--line)] bg-black/25 px-3 py-3 text-sm text-[var(--muted)] file:mr-3 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-3 file:py-1 file:text-sm file:font-semibold file:text-[#19130b] hover:border-[var(--brass)]"
+            <span className="text-sm text-[var(--muted)]">Music type</span>
+            <select
+              className="mt-2 h-12 w-full rounded-md border border-[var(--line)] bg-black/25 px-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--brass)]"
+              defaultValue="cinematic_ambient"
               disabled={isSubmitting}
-              multiple
-              name="images"
-              onChange={(event) => {
-                const nextFiles = Array.from(event.currentTarget.files ?? []);
-                setSelectedFiles(nextFiles);
-                setStatusText(null);
-                setCurrentStep(0);
-
-                showToast({
-                  kind: "info",
-                  message: `${nextFiles.length} files selected. Click Create project to start uploading.`,
-                  title: "Images selected",
-                });
-              }}
+              name="musicGenre"
               required
-              type="file"
-            />
+            >
+              {MUSIC_GENRES.map((genre) => (
+                <option key={genre.value} value={genre.value}>
+                  {genre.label}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
+
+        <label className="block">
+          <span className="text-sm text-[var(--muted)]">Source images</span>
+          <input
+            accept="image/jpeg,image/png,image/webp,image/heic"
+            className="mt-2 block h-12 w-full cursor-pointer rounded-md border border-[var(--line)] bg-black/25 px-3 py-3 text-sm text-[var(--muted)] file:mr-3 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-3 file:py-1 file:text-sm file:font-semibold file:text-[#19130b] hover:border-[var(--brass)]"
+            disabled={isSubmitting}
+            multiple
+            name="images"
+            onChange={(event) => {
+              const nextFiles = Array.from(event.currentTarget.files ?? []);
+              setSelectedFiles(nextFiles);
+              setStatusText(null);
+              setCurrentStep(0);
+
+              showToast({
+                kind: "info",
+                message: `${nextFiles.length} files selected. Click Create project to start uploading.`,
+                title: "Images selected",
+              });
+            }}
+            required
+            type="file"
+          />
+        </label>
 
         {selectedFiles.length ? (
           <div className="rounded-lg border border-white/10 bg-black/20 p-3">

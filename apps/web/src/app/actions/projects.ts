@@ -16,6 +16,7 @@ const IMAGE_REQUIREMENTS = getVideoImageRequirements();
 export interface CreateProjectInput {
   customerName: string;
   imageStorageKeys: string[];
+  musicGenre: string;
   projectId: string;
   specialNotes: string | null;
   voiceSelection: string;
@@ -59,7 +60,8 @@ export async function createProjectFromUploadedAssets(
 ): Promise<CreateProjectResult> {
   const { organization, supabase, user } = await getRequiredWorkspace();
   const customerName = cleanText(input.customerName);
-  const voiceSelection = cleanText(input.voiceSelection, "warm_editorial");
+  const musicGenre = cleanText(input.musicGenre, "cinematic_ambient");
+  const voiceSelection = cleanText(input.voiceSelection, "speaker_amelie");
   const specialNotes = input.specialNotes?.trim() || null;
 
   if (!UUID_PATTERN.test(input.projectId)) {
@@ -93,6 +95,7 @@ export async function createProjectFromUploadedAssets(
     created_by: user.id,
     customer_name: customerName,
     id: input.projectId,
+    music_genre: musicGenre,
     organization_id: organization.id,
     special_notes: specialNotes,
     status: "submitted",
@@ -134,6 +137,8 @@ export async function createProjectFromUploadedAssets(
     metadata: {
       imageEnhancement: "nano-banana-pro",
       imageToVideo: "kling-3.0",
+      musicGenre,
+      voiceSelection,
     },
     project_id: input.projectId,
     status: "completed",

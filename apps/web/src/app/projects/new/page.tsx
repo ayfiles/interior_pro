@@ -82,8 +82,8 @@ export default async function NewProjectPage({
               <div className="flex gap-3">
                 <Mic2 className="mt-0.5 size-4 text-[var(--brass)]" />
                 <p>
-                  The voice direction is stored with the project and will feed
-                  the narration stage.
+                  The selected speaker and music type are stored with the
+                  project and will feed the narration and edit stages.
                 </p>
               </div>
               <div className="flex gap-3">

@@ -5,9 +5,9 @@ Stand: 2026-05-12
 ## Kurzfassung
 
 Die App ist lokal lauffaehig und mit Supabase verbunden.
-Account, Organisation, Dashboard, Projekt-Upload, Inngest-Orchestrierung, Validation, der erste echte Nano-Banana-Pro-Upscaling-Step und ein Kling-Videogeneration-Stub funktionieren.
+Account, Organisation, Dashboard, Projekt-Upload, Inngest-Orchestrierung, Validation, der erste echte Nano-Banana-Pro-Upscaling-Step und ein echter Kling-3.0-Pro-Single-Shot-Test funktionieren.
 
-Noch kein fertiges Produkt: echte Kling-Video-Generation, Remotion-Finalisierung, Quality Check, echtes Billing, Production Deployment und Retry/Delete/Admin-Flows fehlen noch.
+Noch kein fertiges Produkt: Multi-Shot-Video-Generation, Remotion-Finalisierung, Quality Check, echtes Billing, Production Deployment und Retry/Delete/Admin-Flows fehlen noch.
 
 Supabase Projekt: `interiorpro`
 Supabase Project ID: `tjwqzjzgokfmrzesbulu`
@@ -47,16 +47,18 @@ GitHub Repo: `ayfiles/interior_pro`
   - `project_images.upscaled_storage_key` setzen
   - `project_images.video_status` auf `upscaled` setzen
   - Status `generating_video`
-  - Enhanced Image fuer den Kling-Step aus Supabase Storage laden
-  - Kling Prompt-Regeln aus Markdown laden
-  - Stub-Agent entscheidet pro Bild Kamera-Move, Dauer und Prompt
-  - Stub-Clip-Artefakt in `project-generated-clips` speichern
+  - fuer den Kling-Step eine signed URL fuer das Enhanced Image erzeugen
+  - Single-Shot-Prompt aus `single-shot.md` laden
+  - genau 1 KIE.AI Kling 3.0 Pro Task starten (`duration: "4"`, `mode: "pro"`, `aspect_ratio: "16:9"`, `sound: false`, `multi_shots: false`)
+  - KIE Task pollen
+  - echtes MP4 in `project-generated-clips` speichern
   - `project_images.video_storage_key` setzen
-  - `project_images.video_status` auf `clip_stubbed` setzen
-  - Status `media_qc`
+  - `project_images.video_status` auf `clip_generated` setzen
+  - Status `editing`
   - Logs schreiben
 - Upscaling-Prompt ist versioniert in `apps/web/src/inngest/prompts/upscaling.md`.
-- Kling-Prompt-Regeln sind versioniert in `apps/web/src/inngest/prompts/kling.md`.
+- Video-Agent-Regeln sind versioniert in `apps/web/src/inngest/prompts/agent.md`.
+- Multi-Shot-Prompt ist versioniert in `apps/web/src/inngest/prompts/multi-shot.md`.
 - Supabase RLS ist aktiv.
 - Die vorherige `organization_members` infinite-recursion Policy ist gefixt.
 - Build, Typecheck und Lint laufen durch.
@@ -73,17 +75,18 @@ GitHub Repo: `ayfiles/interior_pro`
 
 ### Pipeline-Status
 
-- `draft`, `submitted`, `queued`, `validating`, `upscaling`, `generating_video`, `media_qc` und `failed` werden genutzt.
+- `draft`, `submitted`, `queued`, `validating`, `upscaling`, `generating_video`, `editing` und `failed` werden im aktiven Flow genutzt.
 - Nach erfolgreichem Upscaling setzt die Pipeline das Projekt automatisch auf `generating_video`.
-- Der Kling-Stub setzt das Projekt nach dem Clip-Artefakt automatisch auf `media_qc`.
-- Der naechste Ausbau sollte den echten Kling-API-Call anstelle des Stub-Artefakts einsetzen.
+- Der Kling-Single-Shot-Step setzt das Projekt nach dem MP4-Clip automatisch auf `editing`.
+- Multi-Shot, Callback-Verarbeitung und Runway-Fallback fehlen noch.
+- `media_qc` bleibt im Schema vorhanden, wird aber bewusst uebersprungen.
 
 ### Storage
 
 - Private Supabase Buckets funktionieren.
 - Source Upload funktioniert.
 - Enhanced Upload funktioniert.
-- Kling-Stub-Artefakte werden im `project-generated-clips` Bucket gespeichert.
+- Kling-MP4-Artefakte werden im `project-generated-clips` Bucket gespeichert.
 - Es gibt noch kein Cleanup fuer alte/orphaned Storage Assets.
 
 ### UI
@@ -94,10 +97,10 @@ GitHub Repo: `ayfiles/interior_pro`
 
 ## Was noch nicht geht
 
-- Kein echter Kling 3.0 Video-Step.
-- Kein echter Kling API Call; aktuell gibt es nur ein JSON-Stub-Artefakt statt MP4/MOV.
+- Kein Multi-Shot-Kling-Flow.
+- Kein KIE Callback-Endpoint; lokal wird aktuell gepollt.
 - Kein Runway-Fallback.
-- Kein echter Media-QC nach Kling.
+- Kein Media-QC Schritt; dieser wird bewusst uebersprungen.
 - Kein Remotion-Agent fuer finale Komposition, Logos, Overlays, Musik und Schnitt.
 - Kein finaler Video-Export.
 - Kein finaler Quality-Check-Agent.
@@ -124,21 +127,21 @@ Zuletzt geprueft: 2026-05-12
 | Upscaled images | 1 |
 | Video artifacts | 1 |
 | Credit reservations | 1 |
-| Pipeline logs | 19 |
+| Pipeline logs | 23 |
 | Objects im `project-source-assets` Bucket | 6 |
 | Enhanced Storage Objects | 1 |
-| Objects im `project-generated-clips` Bucket | 1 |
+| Objects im `project-generated-clips` Bucket | 2 |
 
 Aktuelles Testprojekt:
 
 - Name: `Thelen & Drifte Kitchen Test`
 - Project ID: `993915ae-f3fb-48d5-af61-8c6605629cae`
-- Status: `media_qc`
+- Status: `editing`
 - Source images: 1
 - Enhanced images: 1
-- Video artifacts: 1 JSON Stub-Artefakt
+- Video artifacts: 1 echtes MP4 plus 1 altes JSON-Stub-Artefakt im Storage
 - Enhanced output: JPEG, `2752x1536`, ca. `2.26 MB`
-- Video artifact: `clip_stubbed`, Kamera-Move `push_in`, Dauer `5s`
+- Video artifact: `clip_generated`, Kling 3.0 Pro, `4.042s`, MP4, ca. `5.17 MB`, `72` KIE Credits
 - Geschaetzte Gemini-Kosten fuer den erfolgreichen Upscaling-Test: ca. `$0.14`
 
 Hinweis: Im Storage liegen noch alte Objekte aus frueheren Tests. Cleanup ist noch offen.
@@ -154,35 +157,37 @@ Hinweis: Im Storage liegen noch alte Objekte aus frueheren Tests. Cleanup ist no
 - Queue/Orchestration: Inngest.
 - Image Enhancement: Nano Banana Pro via Gemini REST API (`gemini-3-pro-image-preview`).
 - Upscaling Output: 2K, 16:9.
-- Ziel fuer Image-to-Video: Kling 3.0; aktuell als Stub mit JSON-Artefakt.
+- Ziel fuer Image-to-Video: Kling 3.0 Pro ueber KIE.AI; erster echter Single-Shot-Test ist erfolgreich.
+- KIE.AI wird ueber Bearer Token (`KIE_API_KEY`) angebunden.
+- KIE.AI Kling 3.0 nutzt `POST /api/v1/jobs/createTask` mit `model: kling-3.0/video`.
+- KIE.AI Tasks sind async: erst `taskId`, danach Callback oder Polling ueber `/api/v1/jobs/recordInfo`.
 - Runway ist als spaeterer Fallback vorgesehen.
 - Remotion soll als Agent-Tool fuer finale Komposition, Overlays, Logos und Rendering genutzt werden.
-- Der `project-generated-clips` Bucket erlaubt waehrend der Stub-Phase zusaetzlich `application/json`.
+- Der `project-generated-clips` Bucket erlaubt `application/json`, `video/mp4` und `video/quicktime`.
 
 ## Naechste sinnvolle Schritte
 
 1. Kosten/Provider-Metadaten pro Pipeline-Step besser speichern, z.B. Modell, Output-Groesse, geschaetzte Kosten, Dauer.
-2. Den Kling-Stub durch den echten Kling API Call ersetzen:
-   - Enhanced Images an Kling senden.
-   - Agent-Prompt aus `kling.md` weiterverwenden.
-   - echtes MP4/MOV in `project-generated-clips` speichern.
-   - `video_status` auf echten Erfolgsstatus setzen.
+2. Kling-Flow ausbauen:
+   - KIE Task/Provider-Metadaten strukturiert in DB-Spalten oder separater Artifact-Tabelle speichern.
+   - Multi-Shot Prompt aus `multi-shot.md` in den echten KIE-Flow einhaengen.
+   - KIE Callback-Endpoint bauen, damit Produktion nicht auf Polling angewiesen ist.
+   - Agent-Entscheidung aus `agent.md` spaeter wieder fuer Multi-Shot/Camera-Planning verwenden.
 3. Retry-Flow fuer Pipeline-Steps bauen, besonders fuer Upscaling und Kling.
 4. Cleanup fuer orphaned Storage Assets bauen.
 5. Projekt-Detailseite mit Polling oder Supabase Realtime live machen.
-6. Media-QC-Stub oder echten Media-QC-Agent einbauen.
-7. Remotion-Step planen und danach bauen:
+6. Remotion-Step planen und danach bauen:
    - Clips einsammeln.
    - Logo/Overlay/Musik/Voice/Brand-Daten anwenden.
    - Remotion-Script erzeugen.
    - Render starten.
    - Final Output speichern.
-8. Quality-Check-Agent nach Render einbauen.
-9. Credits korrekt abrechnen:
+7. Quality-Check-Agent nach Render einbauen.
+8. Credits korrekt abrechnen:
    - Reservation bei Erfolg konsumieren.
    - Bei Fehlern freigeben oder teilweise refundieren.
    - Provider-Kosten intern tracken.
-10. Production Deployment vorbereiten:
+9. Production Deployment vorbereiten:
    - Vercel Env Vars.
    - Inngest Cloud Signing/Event Keys.
    - Supabase Storage/RLS final pruefen.
@@ -190,11 +195,10 @@ Hinweis: Im Storage liegen noch alte Objekte aus frueheren Tests. Cleanup ist no
 
 ## Letzte technische Validierung
 
-Zuletzt erfolgreich am 2026-05-12:
+Zuletzt erfolgreich am 2026-05-12 nach dem Kling-Single-Shot-Umbau:
 
 - `corepack pnpm --filter @interior-pro/pipeline typecheck`
 - `corepack pnpm --filter @interior-pro/web typecheck`
 - `corepack pnpm --filter @interior-pro/web lint`
-- `corepack pnpm --filter @interior-pro/web build`
 
-Alle Checks waren gruen.
+Alle ausgefuehrten Checks waren gruen. Der Web-Build war vor dem Kling-Umbau gruen und sollte vor dem naechsten Commit erneut laufen.
