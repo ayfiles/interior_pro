@@ -7,7 +7,7 @@ import {
   Mic2,
 } from "lucide-react";
 import Link from "next/link";
-import { VIDEO_REQUIREMENTS } from "@interior-pro/shared";
+import { getVideoImageRequirements } from "@interior-pro/shared";
 import { NewProjectForm } from "@/components/new-project-form";
 import { getRequiredWorkspace } from "@/lib/workspace";
 
@@ -22,6 +22,7 @@ export default async function NewProjectPage({
 }: NewProjectPageProps) {
   const { message } = await searchParams;
   const { organization } = await getRequiredWorkspace();
+  const imageRequirements = getVideoImageRequirements();
 
   return (
     <main className="app-shell fine-grid min-h-screen px-4 py-6 text-[var(--foreground)] sm:px-6 lg:px-8">
@@ -54,7 +55,10 @@ export default async function NewProjectPage({
             </p>
           ) : null}
 
-          <NewProjectForm organizationId={organization.id} />
+          <NewProjectForm
+            imageRequirements={imageRequirements}
+            organizationId={organization.id}
+          />
         </section>
 
         <aside className="grid content-start gap-4">
@@ -67,9 +71,12 @@ export default async function NewProjectPage({
               <div className="flex gap-3">
                 <Images className="mt-0.5 size-4 text-[var(--brass)]" />
                 <p>
-                  {VIDEO_REQUIREMENTS.minImages}-{VIDEO_REQUIREMENTS.maxImages}{" "}
+                  {imageRequirements.minImages}-{imageRequirements.maxImages}{" "}
                   polished stills, ideally mixed wide, detail, and room-context
                   shots.
+                  {imageRequirements.isTestOverride
+                    ? " Test mode is allowing fewer images."
+                    : null}
                 </p>
               </div>
               <div className="flex gap-3">

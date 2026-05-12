@@ -15,8 +15,9 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import { VIDEO_REQUIREMENTS } from "@interior-pro/shared";
+import type { VideoImageRequirements } from "@interior-pro/shared";
 import { projectStoragePrefix, STORAGE_BUCKETS } from "@interior-pro/supabase";
+import { enqueueProjectPipeline } from "@/app/actions/projects";
 import { createClient } from "@/lib/supabase/client";
 
 const ALLOWED_IMAGE_TYPES = new Set([
@@ -38,6 +39,7 @@ interface ToastState {
 }
 
 interface NewProjectFormProps {
+  imageRequirements: VideoImageRequirements;
   organizationId: string;
 }
 
@@ -75,7 +77,10 @@ function ToastIcon({ kind }: { kind: ToastKind }) {
   return <AlertCircle className="size-5 text-[var(--brass)]" />;
 }
 
-export function NewProjectForm({ organizationId }: NewProjectFormProps) {
+export function NewProjectForm({
+  imageRequirements,
+  organizationId,
+}: NewProjectFormProps) {
   const router = useRouter();
   const supabase = useMemo(() => createClient(), []);
   const [createdProjectId, setCreatedProjectId] = useState<string | null>(null);
@@ -85,7 +90,7 @@ export function NewProjectForm({ organizationId }: NewProjectFormProps) {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
 
-  const totalSteps = selectedFiles.length + 3;
+  const totalSteps = selectedFiles.length + 4;
   const progressPercent =
     totalSteps > 0 ? Math.min((currentStep / totalSteps) * 100, 100) : 0;
 
@@ -110,10 +115,10 @@ export function NewProjectForm({ organizationId }: NewProjectFormProps) {
 
   function validateImages(images: File[]) {
     if (
-      images.length < VIDEO_REQUIREMENTS.minImages ||
-      images.length > VIDEO_REQUIREMENTS.maxImages
+      images.length < imageRequirements.minImages ||
+      images.length > imageRequirements.maxImages
     ) {
-      return `Upload ${VIDEO_REQUIREMENTS.minImages}-${VIDEO_REQUIREMENTS.maxImages} product images.`;
+      return `Upload ${imageRequirements.minImages}-${imageRequirements.maxImages} product images.`;
     }
 
     const invalidImage = images.find(
@@ -307,11 +312,20 @@ export function NewProjectForm({ organizationId }: NewProjectFormProps) {
         throw submitError;
       }
 
+      setCurrentStep(images.length + 4);
+      setStatusText("Queueing pipeline");
+
+      const enqueueResult = await enqueueProjectPipeline(projectId);
+
+      if (!enqueueResult.ok) {
+        throw new Error(enqueueResult.error);
+      }
+
       setCurrentStep(totalSteps);
       setStatusText("Project created. Opening detail view.");
       showToast({
         kind: "success",
-        message: "Uploads, database records, credit reservation, and intake log are saved.",
+        message: "Uploads, database records, credit reservation, intake log, and pipeline event are saved.",
         title: "Project created",
       });
 

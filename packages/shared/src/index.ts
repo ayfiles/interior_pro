@@ -6,6 +6,26 @@ export const VIDEO_REQUIREMENTS = {
   maxDurationSeconds: 45,
 } as const;
 
+export function getVideoImageRequirements(env = process.env) {
+  const requestedMinImages = Number(env.NEXT_PUBLIC_TEST_MIN_IMAGES);
+  const minImages =
+    Number.isInteger(requestedMinImages) &&
+    requestedMinImages >= 1 &&
+    requestedMinImages <= VIDEO_REQUIREMENTS.maxImages
+      ? requestedMinImages
+      : VIDEO_REQUIREMENTS.minImages;
+
+  return {
+    ...VIDEO_REQUIREMENTS,
+    isTestOverride: minImages !== VIDEO_REQUIREMENTS.minImages,
+    minImages,
+  };
+}
+
+export type VideoImageRequirements = ReturnType<
+  typeof getVideoImageRequirements
+>;
+
 export const AI_PROVIDERS = {
   imageEnhancement: {
     primary: "nano-banana-pro",

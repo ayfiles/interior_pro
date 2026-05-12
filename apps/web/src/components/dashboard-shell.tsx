@@ -15,7 +15,7 @@ import {
 } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
-import { AI_PROVIDERS, VIDEO_REQUIREMENTS } from "@interior-pro/shared";
+import { AI_PROVIDERS, getVideoImageRequirements } from "@interior-pro/shared";
 import { signOut } from "@/app/actions/auth";
 
 export interface DashboardProject {
@@ -34,10 +34,12 @@ export interface DashboardCreditSummary {
   reserved: number;
 }
 
+const imageRequirements = getVideoImageRequirements();
+
 const pipeline = [
   {
     label: "Intake",
-    value: `${VIDEO_REQUIREMENTS.minImages}-${VIDEO_REQUIREMENTS.maxImages} images`,
+    value: `${imageRequirements.minImages}-${imageRequirements.maxImages} images`,
     icon: Upload,
   },
   {

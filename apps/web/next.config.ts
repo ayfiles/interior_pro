@@ -16,6 +16,7 @@ const nextConfig: NextConfig = {
     "@interior-pro/shared",
     "@interior-pro/supabase",
     "@interior-pro/billing",
+    "@interior-pro/pipeline",
   ],
   images: {
     remotePatterns: [

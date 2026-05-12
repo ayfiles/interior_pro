@@ -38,6 +38,7 @@ interface ProjectImageRow {
   id: string;
   order_index: number;
   original_storage_key: string;
+  upscaled_storage_key: string | null;
   video_status: string;
 }
 
@@ -79,7 +80,9 @@ export default async function ProjectPage({
 
   const { data: images } = await supabase
     .from("project_images")
-    .select("id, original_storage_key, order_index, video_status")
+    .select(
+      "id, original_storage_key, upscaled_storage_key, order_index, video_status",
+    )
     .eq("project_id", id)
     .order("order_index", { ascending: true });
 
@@ -97,12 +100,15 @@ export default async function ProjectPage({
 
   const signedImages = await Promise.all(
     ((images ?? []) as ProjectImageRow[]).map(async (image) => {
+      const previewStorageKey =
+        image.upscaled_storage_key ?? image.original_storage_key;
       const { data } = await supabase.storage
         .from(STORAGE_BUCKETS.sourceAssets)
-        .createSignedUrl(image.original_storage_key, 60 * 10);
+        .createSignedUrl(previewStorageKey, 60 * 10);
 
       return {
         ...image,
+        isEnhanced: Boolean(image.upscaled_storage_key),
         signedUrl: data?.signedUrl,
       };
     }),
@@ -180,7 +186,7 @@ export default async function ProjectPage({
                     <div className="relative aspect-[4/3] bg-[#0f0c09]">
                       {image.signedUrl ? (
                         <Image
-                          alt={`Project source ${image.order_index + 1}`}
+                          alt={`Project ${image.isEnhanced ? "enhanced" : "source"} ${image.order_index + 1}`}
                           className="object-cover"
                           fill
                           sizes="(min-width: 1024px) 30vw, 50vw"
@@ -194,7 +200,11 @@ export default async function ProjectPage({
                     </div>
                     <div className="flex items-center justify-between px-3 py-2 text-xs text-[var(--muted)]">
                       <span>Frame {image.order_index + 1}</span>
-                      <span>{statusLabel(image.video_status)}</span>
+                      <span>
+                        {image.isEnhanced
+                          ? "Enhanced"
+                          : statusLabel(image.video_status)}
+                      </span>
                     </div>
                   </article>
                 ))}
