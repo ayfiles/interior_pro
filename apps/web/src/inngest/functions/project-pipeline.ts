@@ -8,6 +8,13 @@ import {
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { inngest, PROJECT_SUBMITTED_EVENT } from "@/inngest/client";
+import {
+  buildProviderJobKey,
+  ensureProviderJob,
+  getErrorMessage,
+  updateProviderJob,
+  type ProviderJob,
+} from "@/inngest/provider-jobs";
 import { createAdminClient, type Json } from "@/lib/supabase/admin";
 
 type PipelineLogStatus = "started" | "completed" | "failed" | "skipped";
@@ -19,6 +26,7 @@ type EnhancedImageResult = {
   skipped: boolean;
 };
 type GeneratedClipResult = {
+  callbackPending?: boolean;
   clipStorageKey: string;
   creditsConsumed?: number;
   durationSeconds?: number;
@@ -131,6 +139,91 @@ function getVideoContentType(response: Response) {
   return "video/mp4";
 }
 
+function buildUpscalingProviderJobKey({
+  imageId,
+  projectId,
+  sourceStorageKey,
+}: {
+  imageId: string;
+  projectId: string;
+  sourceStorageKey: string;
+}) {
+  return buildProviderJobKey([
+    "project",
+    projectId,
+    "image",
+    imageId,
+    "upscaling",
+    AI_PROVIDERS.imageEnhancement.model,
+    sourceStorageKey,
+    "2k",
+    "16:9",
+  ]);
+}
+
+function buildKlingProviderJobKey({
+  clipStorageKey,
+  imageId,
+  projectId,
+}: {
+  clipStorageKey: string;
+  imageId: string;
+  projectId: string;
+}) {
+  return buildProviderJobKey([
+    "project",
+    projectId,
+    "image",
+    imageId,
+    "video-generation",
+    "kling-3.0-pro",
+    clipStorageKey,
+    KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+    KLING_SINGLE_SHOT_TEST_CONFIG.mode,
+  ]);
+}
+
+function buildProviderResumeBlockMessage(job: ProviderJob) {
+  return [
+    `Provider job ${job.id} for ${job.step} is ${job.status}.`,
+    "The pipeline will not start a second paid provider request automatically.",
+    "Clear or reset the provider job manually before retrying this paid step.",
+  ].join(" ");
+}
+
+function mapKieTaskStateToProviderStatus(state: string) {
+  if (state === "fail" || state === "failed") {
+    return "failed" as const;
+  }
+
+  if (state === "success") {
+    return "processing" as const;
+  }
+
+  return "processing" as const;
+}
+
+function getKieCallbackUrl() {
+  const baseUrl =
+    process.env.KIE_CALLBACK_URL ??
+    (process.env.NEXT_PUBLIC_APP_URL
+      ? `${process.env.NEXT_PUBLIC_APP_URL.replace(/\/$/, "")}/api/kie/callback`
+      : null);
+
+  if (!baseUrl) {
+    return null;
+  }
+
+  const callbackUrl = new URL(baseUrl);
+  const callbackSecret = process.env.KIE_CALLBACK_SECRET;
+
+  if (callbackSecret && !callbackUrl.searchParams.has("token")) {
+    callbackUrl.searchParams.set("token", callbackSecret);
+  }
+
+  return callbackUrl.toString();
+}
+
 async function writePipelineLog({
   message,
   metadata,
@@ -177,7 +270,7 @@ export const projectPipeline = inngest.createFunction(
   {
     id: "project-pipeline",
     name: "Project Pipeline",
-    retries: 2,
+    retries: 0,
     triggers: { event: PROJECT_SUBMITTED_EVENT },
   },
   async ({ event, step }) => {
@@ -465,15 +558,141 @@ export const projectPipeline = inngest.createFunction(
             const sourceBytes = new Uint8Array(await sourceFile.arrayBuffer());
             const sourceMimeType =
               sourceFile.type || inferImageMimeType(image.original_storage_key);
-
-            const result = await enhanceImageWithNanoBananaPro({
-              aspectRatio: "16:9",
-              prompt: upscalingPrompt,
-              sourceImage: sourceBytes,
-              sourceMimeType,
-              sourceStorageKey: image.original_storage_key,
-              targetResolution: "2K",
+            const plannedOutputStorageKey = buildEnhancedStorageKey(
+              image.original_storage_key,
+              "image/png",
+            );
+            const providerJob = await ensureProviderJob({
+              idempotencyKey: buildUpscalingProviderJobKey({
+                imageId: image.id,
+                projectId,
+                sourceStorageKey: image.original_storage_key,
+              }),
+              model: AI_PROVIDERS.imageEnhancement.model,
+              outputStorageKey: plannedOutputStorageKey,
+              projectId,
+              projectImageId: image.id,
+              provider: AI_PROVIDERS.imageEnhancement.primary,
+              request: {
+                aspectRatio: "16:9",
+                promptPath: UPSCALING_PROMPT_PATH,
+                sourceMimeType,
+                sourceStorageKey: image.original_storage_key,
+                targetResolution: "2K",
+              },
+              step: "upscaling",
             });
+
+            if (!providerJob.created) {
+              if (
+                ["completed", "requires_manual_retry"].includes(
+                  providerJob.job.status,
+                ) &&
+                providerJob.job.output_storage_key
+              ) {
+                const { error: existingOutputError } = await supabase.storage
+                  .from(STORAGE_BUCKETS.sourceAssets)
+                  .download(providerJob.job.output_storage_key);
+
+                if (existingOutputError) {
+                  const message = buildProviderResumeBlockMessage(
+                    providerJob.job,
+                  );
+
+                  await writePipelineLog({
+                    message,
+                    metadata: {
+                      imageId: image.id,
+                      providerJobId: providerJob.job.id,
+                      providerJobStatus: providerJob.job.status,
+                      storageError: existingOutputError.message,
+                    },
+                    projectId,
+                    status: "failed",
+                    step: "upscaling",
+                  });
+
+                  throw new Error(message);
+                }
+
+                const { error: updateError } = await supabase
+                  .from("project_images")
+                  .update({
+                    upscaled_storage_key: providerJob.job.output_storage_key,
+                    video_status: "upscaled",
+                  })
+                  .eq("id", image.id);
+
+                if (updateError) {
+                  throw updateError;
+                }
+
+                if (providerJob.job.status !== "completed") {
+                  await updateProviderJob(providerJob.job.id, {
+                    completed_at: new Date().toISOString(),
+                    status: "completed",
+                  });
+                }
+
+                await writePipelineLog({
+                  message: `Image ${image.order_index + 1} reused completed image enhancement provider job.`,
+                  metadata: {
+                    imageId: image.id,
+                    outputStorageKey: providerJob.job.output_storage_key,
+                    providerJobId: providerJob.job.id,
+                  },
+                  projectId,
+                  status: "skipped",
+                  step: "upscaling",
+                });
+
+                return {
+                  imageId: image.id,
+                  orderIndex: image.order_index,
+                  outputStorageKey: providerJob.job.output_storage_key,
+                  skipped: true,
+                };
+              }
+
+              const message = buildProviderResumeBlockMessage(providerJob.job);
+
+              await writePipelineLog({
+                message,
+                metadata: {
+                  imageId: image.id,
+                  providerJobId: providerJob.job.id,
+                  providerJobStatus: providerJob.job.status,
+                },
+                projectId,
+                status: "failed",
+                step: "upscaling",
+              });
+
+              throw new Error(message);
+            }
+
+            let result: Awaited<
+              ReturnType<typeof enhanceImageWithNanoBananaPro>
+            >;
+
+            try {
+              result = await enhanceImageWithNanoBananaPro({
+                aspectRatio: "16:9",
+                prompt: upscalingPrompt,
+                sourceImage: sourceBytes,
+                sourceMimeType,
+                sourceStorageKey: image.original_storage_key,
+                targetResolution: "2K",
+              });
+            } catch (error) {
+              await updateProviderJob(providerJob.job.id, {
+                error_message: getErrorMessage(error),
+                failed_at: new Date().toISOString(),
+                status: "failed",
+              });
+
+              throw error;
+            }
 
             const outputStorageKey = buildEnhancedStorageKey(
               image.original_storage_key,
@@ -484,41 +703,72 @@ export const projectPipeline = inngest.createFunction(
               result.outputImage.byteOffset + result.outputImage.byteLength,
             ) as ArrayBuffer;
 
-            const { error: uploadError } = await supabase.storage
-              .from(STORAGE_BUCKETS.sourceAssets)
-              .upload(
-                outputStorageKey,
-                new Blob([outputArrayBuffer], {
-                  type: result.outputMimeType,
-                }),
-                {
-                  contentType: result.outputMimeType,
-                  upsert: true,
-                },
-              );
+            try {
+              const { error: uploadError } = await supabase.storage
+                .from(STORAGE_BUCKETS.sourceAssets)
+                .upload(
+                  outputStorageKey,
+                  new Blob([outputArrayBuffer], {
+                    type: result.outputMimeType,
+                  }),
+                  {
+                    contentType: result.outputMimeType,
+                    upsert: true,
+                  },
+                );
 
-            if (uploadError) {
-              throw uploadError;
-            }
+              if (uploadError) {
+                throw uploadError;
+              }
 
-            const { error: updateError } = await supabase
-              .from("project_images")
-              .update({
-                analysis: {
-                  aspectRatio: "16:9",
+              const { error: updateError } = await supabase
+                .from("project_images")
+                .update({
+                  analysis: {
+                    aspectRatio: "16:9",
+                    model: result.model,
+                    provider: result.provider,
+                    providerJobId: providerJob.job.id,
+                    sourceMimeType,
+                    targetResolution: "2K",
+                  },
+                  upscaled_storage_key: outputStorageKey,
+                  video_status: "upscaled",
+                })
+                .eq("id", image.id);
+
+              if (updateError) {
+                throw updateError;
+              }
+            } catch (error) {
+              await updateProviderJob(providerJob.job.id, {
+                error_message: getErrorMessage(error),
+                output_storage_key: outputStorageKey,
+                response: {
                   model: result.model,
+                  outputBytes: result.outputImage.byteLength,
+                  outputMimeType: result.outputMimeType,
                   provider: result.provider,
-                  sourceMimeType,
-                  targetResolution: "2K",
+                  responseText: result.responseText ?? null,
                 },
-                upscaled_storage_key: outputStorageKey,
-                video_status: "upscaled",
-              })
-              .eq("id", image.id);
+                status: "requires_manual_retry",
+              });
 
-            if (updateError) {
-              throw updateError;
+              throw error;
             }
+
+            await updateProviderJob(providerJob.job.id, {
+              completed_at: new Date().toISOString(),
+              output_storage_key: outputStorageKey,
+              response: {
+                model: result.model,
+                outputBytes: result.outputImage.byteLength,
+                outputMimeType: result.outputMimeType,
+                provider: result.provider,
+                responseText: result.responseText ?? null,
+              },
+              status: "completed",
+            });
 
             await writePipelineLog({
               message: `Image ${image.order_index + 1} enhanced and stored.`,
@@ -527,6 +777,7 @@ export const projectPipeline = inngest.createFunction(
                 outputMimeType: result.outputMimeType,
                 outputStorageKey,
                 provider: result.provider,
+                providerJobId: providerJob.job.id,
                 sourceStorageKey: image.original_storage_key,
               },
               projectId,
@@ -576,6 +827,8 @@ export const projectPipeline = inngest.createFunction(
           null,
       }))
       .slice(0, 1);
+    const kieCallbackUrl = getKieCallbackUrl();
+    const shouldUseKieCallback = Boolean(kieCallbackUrl);
 
     await step.run("start-video-generation", async () => {
       await updateProjectStatus(projectId, "generating_video");
@@ -589,6 +842,7 @@ export const projectPipeline = inngest.createFunction(
           provider: AI_PROVIDERS.imageToVideo.primary,
           request: {
             aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
+            callbackEnabled: shouldUseKieCallback,
             duration: String(KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds),
             mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
             multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
@@ -663,6 +917,121 @@ export const projectPipeline = inngest.createFunction(
           const clipStorageKey = buildClipStorageKey(
             image.upscaled_storage_key,
           );
+          const providerJob = await ensureProviderJob({
+            idempotencyKey: buildKlingProviderJobKey({
+              clipStorageKey,
+              imageId: image.id,
+              projectId,
+            }),
+            model: "kling-3.0/video",
+            outputStorageKey: clipStorageKey,
+            projectId,
+            projectImageId: image.id,
+            provider: AI_PROVIDERS.imageToVideo.primary,
+            request: {
+              aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
+              callbackEnabled: shouldUseKieCallback,
+              durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+              imageStorageKey: image.upscaled_storage_key,
+              mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
+              multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
+              promptPath: SINGLE_SHOT_PROMPT_PATH,
+              sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
+            },
+            step: "video_generation",
+          });
+
+          if (!providerJob.created) {
+            if (
+              providerJob.job.status === "completed" &&
+              providerJob.job.output_storage_key
+            ) {
+              const { error: updateError } = await supabase
+                .from("project_images")
+                .update({
+                  video_storage_key: providerJob.job.output_storage_key,
+                  video_status: "clip_generated",
+                })
+                .eq("id", image.id);
+
+              if (updateError) {
+                throw updateError;
+              }
+
+              await writePipelineLog({
+                message: `Image ${image.order_index + 1} reused completed Kling provider job.`,
+                metadata: {
+                  imageId: image.id,
+                  providerJobId: providerJob.job.id,
+                  videoStorageKey: providerJob.job.output_storage_key,
+                },
+                projectId,
+                status: "skipped",
+                step: "video_generation",
+              });
+
+              return {
+                clipStorageKey: providerJob.job.output_storage_key,
+                imageId: image.id,
+                orderIndex: image.order_index,
+                skipped: true,
+              };
+            }
+
+            if (providerJob.job.external_task_id) {
+              const { error: resumeUpdateError } = await supabase
+                .from("project_images")
+                .update({
+                  video_status: "generating",
+                })
+                .eq("id", image.id);
+
+              if (resumeUpdateError) {
+                throw resumeUpdateError;
+              }
+
+              await writePipelineLog({
+                message: `Resuming existing Kling task for image ${image.order_index + 1}.`,
+                metadata: {
+                  imageId: image.id,
+                  providerJobId: providerJob.job.id,
+                  providerJobStatus: providerJob.job.status,
+                  taskId: providerJob.job.external_task_id,
+                },
+                projectId,
+                status: "started",
+                step: "video_generation",
+              });
+
+              return {
+                callbackPending: shouldUseKieCallback,
+                clipStorageKey:
+                  providerJob.job.output_storage_key ?? clipStorageKey,
+                durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+                imageId: image.id,
+                orderIndex: image.order_index,
+                providerJobId: providerJob.job.id,
+                skipped: false,
+                taskId: providerJob.job.external_task_id,
+              };
+            }
+
+            const message = buildProviderResumeBlockMessage(providerJob.job);
+
+            await writePipelineLog({
+              message,
+              metadata: {
+                imageId: image.id,
+                providerJobId: providerJob.job.id,
+                providerJobStatus: providerJob.job.status,
+              },
+              projectId,
+              status: "failed",
+              step: "video_generation",
+            });
+
+            throw new Error(message);
+          }
 
           const { error: startUpdateError } = await supabase
             .from("project_images")
@@ -675,20 +1044,44 @@ export const projectPipeline = inngest.createFunction(
             throw startUpdateError;
           }
 
-          const task = await createKieKling30Task({
-            aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
-            durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
-            imageUrls: [signedImage.signedUrl],
-            mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
-            multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
-            prompt: singleShotPrompt,
-            sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
+          let task: Awaited<ReturnType<typeof createKieKling30Task>>;
+
+          try {
+            task = await createKieKling30Task({
+              aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
+              callBackUrl: kieCallbackUrl ?? undefined,
+              durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+              imageUrls: [signedImage.signedUrl],
+              mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
+              multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
+              prompt: singleShotPrompt,
+              sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
+            });
+          } catch (error) {
+            await updateProviderJob(providerJob.job.id, {
+              error_message: getErrorMessage(error),
+              failed_at: new Date().toISOString(),
+              status: "failed",
+            });
+
+            throw error;
+          }
+
+          await updateProviderJob(providerJob.job.id, {
+            external_task_id: task.taskId,
+            response: {
+              provider: task.provider,
+              taskId: task.taskId,
+            },
+            status: "submitted",
+            submitted_at: new Date().toISOString(),
           });
 
           await writePipelineLog({
             message: `Kling 3.0 Pro task created for image ${image.order_index + 1}.`,
             metadata: {
               clipStorageKey,
+              callbackEnabled: shouldUseKieCallback,
               durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
               imageId: image.id,
               mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
@@ -696,6 +1089,7 @@ export const projectPipeline = inngest.createFunction(
               multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
               promptPath: SINGLE_SHOT_PROMPT_PATH,
               provider: AI_PROVIDERS.imageToVideo.primary,
+              providerJobId: providerJob.job.id,
               sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
               taskId: task.taskId,
             },
@@ -705,10 +1099,12 @@ export const projectPipeline = inngest.createFunction(
           });
 
           return {
+            callbackPending: shouldUseKieCallback,
             clipStorageKey,
             durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
             imageId: image.id,
             orderIndex: image.order_index,
+            providerJobId: providerJob.job.id,
             taskId: task.taskId,
             skipped: false,
           };
@@ -725,9 +1121,37 @@ export const projectPipeline = inngest.createFunction(
         continue;
       }
 
+      if (
+        "callbackPending" in taskPreparation &&
+        taskPreparation.callbackPending
+      ) {
+        generatedClips.push({
+          callbackPending: true,
+          clipStorageKey: taskPreparation.clipStorageKey ?? "",
+          durationSeconds: taskPreparation.durationSeconds,
+          imageId: taskPreparation.imageId,
+          orderIndex: taskPreparation.orderIndex,
+          skipped: false,
+          taskId:
+            "taskId" in taskPreparation
+              ? taskPreparation.taskId
+              : undefined,
+        });
+        continue;
+      }
+
       if (!("taskId" in taskPreparation) || !taskPreparation.taskId) {
         throw new Error(
           `Kling task was not created for image ${image.order_index + 1}.`,
+        );
+      }
+
+      if (
+        !("providerJobId" in taskPreparation) ||
+        !taskPreparation.providerJobId
+      ) {
+        throw new Error(
+          `Provider job was not persisted for image ${image.order_index + 1}.`,
         );
       }
 
@@ -736,6 +1160,7 @@ export const projectPipeline = inngest.createFunction(
         durationSeconds: taskPreparation.durationSeconds,
         imageId: taskPreparation.imageId,
         orderIndex: taskPreparation.orderIndex,
+        providerJobId: taskPreparation.providerJobId,
         taskId: taskPreparation.taskId,
       };
 
@@ -747,7 +1172,34 @@ export const projectPipeline = inngest.createFunction(
             2,
             "0",
           )}`,
-          () => getKieTaskRecord(activeTask.taskId),
+          async () => {
+            const record = await getKieTaskRecord(activeTask.taskId);
+
+            await updateProviderJob(activeTask.providerJobId, {
+              credits_consumed: record.creditsConsumed ?? null,
+              error_message: record.failMsg ?? null,
+              failed_at:
+                record.state === "fail" || record.state === "failed"
+                  ? new Date().toISOString()
+                  : null,
+              response: {
+                completeTime: record.completeTime ?? null,
+                costTime: record.costTime ?? null,
+                failCode: record.failCode ?? null,
+                failMsg: record.failMsg ?? null,
+                model: record.model ?? null,
+                progress: record.progress ?? null,
+                resultJson: record.resultJson ?? null,
+                resultUrls: record.resultUrls,
+                state: record.state,
+                taskId: record.taskId,
+                updateTime: record.updateTime ?? null,
+              },
+              status: mapKieTaskStateToProviderStatus(record.state),
+            });
+
+            return record;
+          },
         );
 
         if (taskRecord.state === "success") {
@@ -766,11 +1218,18 @@ export const projectPipeline = inngest.createFunction(
               metadata: {
                 failCode: taskRecord?.failCode,
                 imageId: image.id,
+                providerJobId: activeTask.providerJobId,
                 taskId: activeTask.taskId,
               },
               projectId,
               status: "failed",
               step: "video_generation",
+            });
+
+            await updateProviderJob(activeTask.providerJobId, {
+              error_message: message,
+              failed_at: new Date().toISOString(),
+              status: "failed",
             });
 
             const { error } = await supabase
@@ -813,11 +1272,19 @@ export const projectPipeline = inngest.createFunction(
             metadata: {
               imageId: image.id,
               lastState: taskRecord?.state,
+              providerJobId: activeTask.providerJobId,
               taskId: activeTask.taskId,
             },
             projectId,
             status: "failed",
             step: "video_generation",
+          });
+
+          await updateProviderJob(activeTask.providerJobId, {
+            error_message: `Kling task did not finish within ${
+              KLING_MAX_POLLS * KLING_POLL_INTERVAL_SECONDS
+            } seconds.`,
+            status: "requires_manual_retry",
           });
 
           const { error } = await supabase
@@ -843,85 +1310,156 @@ export const projectPipeline = inngest.createFunction(
           const supabase = createAdminClient();
           const resultUrl = taskRecord.resultUrls[0];
 
-          if (!resultUrl) {
-            throw new Error(
-              `Kling task ${activeTask.taskId} completed without a result URL.`,
-            );
-          }
+          try {
+            if (!resultUrl) {
+              throw new Error(
+                `Kling task ${activeTask.taskId} completed without a result URL.`,
+              );
+            }
 
-          const resultResponse = await fetch(resultUrl);
+            const resultResponse = await fetch(resultUrl);
 
-          if (!resultResponse.ok) {
-            throw new Error(
-              `Failed to download Kling result (${resultResponse.status}): ${resultResponse.statusText}`,
-            );
-          }
+            if (!resultResponse.ok) {
+              throw new Error(
+                `Failed to download Kling result (${resultResponse.status}): ${resultResponse.statusText}`,
+              );
+            }
 
-          const contentType = getVideoContentType(resultResponse);
-          const clipBytes = await resultResponse.arrayBuffer();
+            const contentType = getVideoContentType(resultResponse);
+            const clipBytes = await resultResponse.arrayBuffer();
 
-          const { error: uploadError } = await supabase.storage
-            .from(STORAGE_BUCKETS.generatedClips)
-            .upload(
-              activeTask.clipStorageKey,
-              new Blob([clipBytes], {
-                type: contentType,
-              }),
-              {
+            const { error: uploadError } = await supabase.storage
+              .from(STORAGE_BUCKETS.generatedClips)
+              .upload(
+                activeTask.clipStorageKey,
+                new Blob([clipBytes], {
+                  type: contentType,
+                }),
+                {
+                  contentType,
+                  upsert: true,
+                },
+              );
+
+            if (uploadError) {
+              throw uploadError;
+            }
+
+            const { error: updateError } = await supabase
+              .from("project_images")
+              .update({
+                video_storage_key: activeTask.clipStorageKey,
+                video_status: "clip_generated",
+              })
+              .eq("id", image.id);
+
+            if (updateError) {
+              throw updateError;
+            }
+
+            await updateProviderJob(activeTask.providerJobId, {
+              completed_at: new Date().toISOString(),
+              credits_consumed: taskRecord.creditsConsumed ?? null,
+              file_size_bytes: clipBytes.byteLength,
+              output_storage_key: activeTask.clipStorageKey,
+              response: {
+                completeTime: taskRecord.completeTime ?? null,
                 contentType,
-                upsert: true,
+                costTime: taskRecord.costTime ?? null,
+                creditsConsumed: taskRecord.creditsConsumed ?? null,
+                fileSizeBytes: clipBytes.byteLength,
+                model: taskRecord.model ?? "kling-3.0/video",
+                resultJson: taskRecord.resultJson ?? null,
+                resultUrls: taskRecord.resultUrls,
+                state: taskRecord.state,
+                taskId: activeTask.taskId,
               },
-            );
+              status: "completed",
+            });
 
-          if (uploadError) {
-            throw uploadError;
-          }
+            await writePipelineLog({
+              message: `Kling 3.0 Pro clip ${image.order_index + 1} generated and stored.`,
+              metadata: {
+                clipStorageKey: activeTask.clipStorageKey,
+                contentType,
+                creditsConsumed: taskRecord.creditsConsumed,
+                durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+                fileSizeBytes: clipBytes.byteLength,
+                imageId: image.id,
+                mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
+                model: taskRecord.model ?? "kling-3.0/video",
+                provider: AI_PROVIDERS.imageToVideo.primary,
+                providerJobId: activeTask.providerJobId,
+                taskId: activeTask.taskId,
+              },
+              projectId,
+              status: "completed",
+              step: "video_generation",
+            });
 
-          const { error: updateError } = await supabase
-            .from("project_images")
-            .update({
-              video_storage_key: activeTask.clipStorageKey,
-              video_status: "clip_generated",
-            })
-            .eq("id", image.id);
-
-          if (updateError) {
-            throw updateError;
-          }
-
-          await writePipelineLog({
-            message: `Kling 3.0 Pro clip ${image.order_index + 1} generated and stored.`,
-            metadata: {
+            return {
               clipStorageKey: activeTask.clipStorageKey,
-              contentType,
               creditsConsumed: taskRecord.creditsConsumed,
               durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
               fileSizeBytes: clipBytes.byteLength,
               imageId: image.id,
-              mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
-              model: taskRecord.model ?? "kling-3.0/video",
-              provider: AI_PROVIDERS.imageToVideo.primary,
+              orderIndex: image.order_index,
+              skipped: false,
               taskId: activeTask.taskId,
-            },
-            projectId,
-            status: "completed",
-            step: "video_generation",
-          });
+            };
+          } catch (error) {
+            await updateProviderJob(activeTask.providerJobId, {
+              error_message: getErrorMessage(error),
+              output_storage_key: activeTask.clipStorageKey,
+              response: {
+                completeTime: taskRecord.completeTime ?? null,
+                costTime: taskRecord.costTime ?? null,
+                creditsConsumed: taskRecord.creditsConsumed ?? null,
+                model: taskRecord.model ?? "kling-3.0/video",
+                resultJson: taskRecord.resultJson ?? null,
+                resultUrls: taskRecord.resultUrls,
+                state: taskRecord.state,
+                taskId: activeTask.taskId,
+              },
+              status: "requires_manual_retry",
+            });
 
-          return {
-            clipStorageKey: activeTask.clipStorageKey,
-            creditsConsumed: taskRecord.creditsConsumed,
-            durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
-            fileSizeBytes: clipBytes.byteLength,
-            imageId: image.id,
-            orderIndex: image.order_index,
-            skipped: false,
-            taskId: activeTask.taskId,
-          };
+            throw error;
+          }
         },
       );
 
       generatedClips.push(generatedClip);
+    }
+
+    const pendingCallbackClips = generatedClips.filter(
+      (clip) => clip.callbackPending,
+    );
+
+    if (pendingCallbackClips.length > 0) {
+      await step.run("wait-for-kie-callback", async () => {
+        await writePipelineLog({
+          message:
+            "Kling tasks are submitted. Waiting for KIE callbacks to store generated clips.",
+          metadata: {
+            generatedClips,
+            pendingCallbackClips,
+            provider: AI_PROVIDERS.imageToVideo.primary,
+          },
+          projectId,
+          status: "started",
+          step: "video_generation",
+        });
+      });
+
+      return {
+        callbackPending: true,
+        clipCount: generatedClips.length,
+        imageCount: context.images.length,
+        ok: true,
+        projectId,
+        status: "generating_video",
+      };
     }
 
     await step.run("complete-video-generation", async () => {

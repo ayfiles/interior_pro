@@ -3,8 +3,10 @@ import {
   BadgeCheck,
   CalendarClock,
   FileImage,
+  Film,
   Gauge,
   Library,
+  PlayCircle,
   Plus,
 } from "lucide-react";
 import Image from "next/image";
@@ -40,6 +42,7 @@ interface ProjectImageRow {
   order_index: number;
   original_storage_key: string;
   upscaled_storage_key: string | null;
+  video_storage_key: string | null;
   video_status: string;
 }
 
@@ -82,7 +85,7 @@ export default async function ProjectPage({
   const { data: images } = await supabase
     .from("project_images")
     .select(
-      "id, original_storage_key, upscaled_storage_key, order_index, video_status",
+      "id, original_storage_key, upscaled_storage_key, video_storage_key, order_index, video_status",
     )
     .eq("project_id", id)
     .order("order_index", { ascending: true });
@@ -106,9 +109,15 @@ export default async function ProjectPage({
       const { data } = await supabase.storage
         .from(STORAGE_BUCKETS.sourceAssets)
         .createSignedUrl(previewStorageKey, 60 * 10);
+      const { data: videoData } = image.video_storage_key
+        ? await supabase.storage
+            .from(STORAGE_BUCKETS.generatedClips)
+            .createSignedUrl(image.video_storage_key, 60 * 10)
+        : { data: null };
 
       return {
         ...image,
+        clipSignedUrl: videoData?.signedUrl,
         isEnhanced: Boolean(image.upscaled_storage_key),
         signedUrl: data?.signedUrl,
       };
@@ -117,6 +126,7 @@ export default async function ProjectPage({
 
   const typedProject = project as ProjectRow;
   const latestReservation = reservations?.[0];
+  const generatedClips = signedImages.filter((image) => image.clipSignedUrl);
 
   return (
     <main className="app-shell fine-grid min-h-screen px-4 py-6 text-[var(--foreground)] sm:px-6 lg:px-8">
@@ -167,6 +177,62 @@ export default async function ProjectPage({
           <div className="grid gap-5">
             <section className="rounded-lg border border-[var(--line)] bg-[rgba(20,17,14,0.86)] p-5">
               <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <div className="grid size-10 place-items-center rounded-lg border border-[var(--brass)]/35 bg-black/25 text-[var(--brass)]">
+                    <Film className="size-5" />
+                  </div>
+                  <div>
+                    <p className="text-sm text-[var(--muted)]">Generated clip</p>
+                    <h2 className="text-2xl font-semibold">
+                      {generatedClips.length
+                        ? `${generatedClips.length} video${generatedClips.length === 1 ? "" : "s"} ready`
+                        : "No video yet"}
+                    </h2>
+                  </div>
+                </div>
+                <span className="rounded-md border border-white/10 bg-black/25 px-3 py-2 text-sm text-[var(--stone)]">
+                  {statusLabel(typedProject.status)}
+                </span>
+              </div>
+
+              {generatedClips.length ? (
+                <div className="grid gap-3">
+                  {generatedClips.map((clip) => (
+                    <article
+                      className="overflow-hidden rounded-lg border border-white/10 bg-black/25"
+                      key={clip.id}
+                    >
+                      <div className="relative aspect-video bg-[#0f0c09]">
+                        <video
+                          className="h-full w-full object-contain"
+                          controls
+                          playsInline
+                          poster={clip.signedUrl}
+                          preload="metadata"
+                          src={clip.clipSignedUrl}
+                        />
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 text-xs text-[var(--muted)]">
+                        <span>Clip {clip.order_index + 1}</span>
+                        <span>{statusLabel(clip.video_status)}</span>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="grid aspect-video place-items-center rounded-lg border border-dashed border-white/15 bg-black/20 text-center">
+                  <div>
+                    <PlayCircle className="mx-auto size-10 text-[var(--brass)]" />
+                    <p className="mt-3 text-sm text-[var(--muted)]">
+                      {statusLabel(typedProject.status)}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            <section className="rounded-lg border border-[var(--line)] bg-[rgba(20,17,14,0.86)] p-5">
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-sm text-[var(--muted)]">Source set</p>
                   <h2 className="text-2xl font-semibold">
@@ -202,9 +268,11 @@ export default async function ProjectPage({
                     <div className="flex items-center justify-between px-3 py-2 text-xs text-[var(--muted)]">
                       <span>Frame {image.order_index + 1}</span>
                       <span>
-                        {image.isEnhanced
-                          ? "Enhanced"
-                          : statusLabel(image.video_status)}
+                        {image.clipSignedUrl
+                          ? "Clip ready"
+                          : image.isEnhanced
+                            ? "Enhanced"
+                            : statusLabel(image.video_status)}
                       </span>
                     </div>
                   </article>

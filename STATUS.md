@@ -30,6 +30,7 @@ GitHub Repo: `ayfiles/interior_pro`
 - Upload-UI zeigt Ladezustand, Fortschritt und Fehler/Erfolg.
 - Projekt-Detailseite zeigt echte Projekt-Daten, Logs, Status und Bilder ueber signed URLs.
 - Wenn ein Enhanced-Bild existiert, zeigt die Projektseite dieses Bild statt dem Source-Bild.
+- Wenn ein generierter MP4-Clip existiert, zeigt die Projektseite oben eine Video-Vorschau mit Controls ueber signed URL aus `project-generated-clips`.
 - Inngest ist eingerichtet:
   - Client: `apps/web/src/inngest/client.ts`
   - Function: `apps/web/src/inngest/functions/project-pipeline.ts`
@@ -42,20 +43,34 @@ GitHub Repo: `ayfiles/interior_pro`
   - Intake validieren
   - Status `upscaling`
   - Source Image aus Supabase Storage laden
+  - Provider-Job/Idempotency-Lock fuer Gemini anlegen
   - Nano Banana Pro / Gemini API callen
   - Enhanced Image unter `/enhanced/` speichern
+  - Gemini Provider-Metadaten in `provider_jobs` speichern
   - `project_images.upscaled_storage_key` setzen
   - `project_images.video_status` auf `upscaled` setzen
   - Status `generating_video`
   - fuer den Kling-Step eine signed URL fuer das Enhanced Image erzeugen
   - Single-Shot-Prompt aus `single-shot.md` laden
+  - Provider-Job/Idempotency-Lock fuer KIE/Kling anlegen
   - genau 1 KIE.AI Kling 3.0 Pro Task starten (`duration: "4"`, `mode: "pro"`, `aspect_ratio: "16:9"`, `sound: false`, `multi_shots: false`)
-  - KIE Task pollen
+  - KIE Task-ID in `provider_jobs.external_task_id` speichern
+  - lokal ohne Public Callback URL: KIE Task pollen
+  - Produktion mit `KIE_CALLBACK_URL` oder `NEXT_PUBLIC_APP_URL`: auf KIE Callback warten
+  - KIE Callback unter `/api/kie/callback` annehmen
+  - Callback schnell bestaetigen und internen Inngest Job `kie-callback-processor` starten
   - echtes MP4 in `project-generated-clips` speichern
+  - KIE Provider-Metadaten, Credits und Output-Infos in `provider_jobs` speichern
   - `project_images.video_storage_key` setzen
   - `project_images.video_status` auf `clip_generated` setzen
   - Status `editing`
   - Logs schreiben
+- Inngest Auto-Retries sind fuer die Projektpipeline aktuell deaktiviert (`retries: 0`), damit bezahlte Provider-Calls nicht automatisch doppelt gestartet werden.
+- Paid Provider Steps sind idempotent vorbereitet:
+  - fertige Outputs werden wiederverwendet
+  - bestehende KIE Task-IDs werden weitergepollt
+  - KIE Callback-Duplikate werden ueber `provider_jobs` idempotent behandelt
+  - angefangene Gemini-Jobs ohne Output blockieren automatische Doppelaufrufe und verlangen manuellen Retry
 - Upscaling-Prompt ist versioniert in `apps/web/src/inngest/prompts/upscaling.md`.
 - Video-Agent-Regeln sind versioniert in `apps/web/src/inngest/prompts/agent.md`.
 - Multi-Shot-Prompt ist versioniert in `apps/web/src/inngest/prompts/multi-shot.md`.
@@ -70,6 +85,7 @@ GitHub Repo: `ayfiles/interior_pro`
 - Projekt reserviert Credits.
 - Dashboard zeigt Credit-Verbrauch.
 - Aktuell sind es noch Pilot-Credits.
+- Provider-Credits/Metadaten werden fuer KIE in `provider_jobs` gespeichert, soweit der Provider sie liefert.
 - Reservation wird nach erfolgreichem Upscaling noch nicht final konsumiert.
 - Es gibt noch keine echte Preis-/Kostenlogik pro Provider-Step.
 
@@ -92,13 +108,14 @@ GitHub Repo: `ayfiles/interior_pro`
 ### UI
 
 - Dashboard, New Project und Project Detail sind nutzbar.
+- Projekt-Detailseite zeigt generierte Clips als abspielbare Video-Vorschau.
 - Projektseite zeigt noch keine Live-Updates; man muss neu laden.
 - Andere Bereiche wie Billing, Music und Brand Kits sind noch Platzhalter oder nicht gebaut.
 
 ## Was noch nicht geht
 
 - Kein Multi-Shot-Kling-Flow.
-- Kein KIE Callback-Endpoint; lokal wird aktuell gepollt.
+- KIE Callback-Endpoint ist gebaut; lokal wird ohne Public Callback URL weiterhin gepollt.
 - Kein Runway-Fallback.
 - Kein Media-QC Schritt; dieser wird bewusst uebersprungen.
 - Kein Remotion-Agent fuer finale Komposition, Logos, Overlays, Musik und Schnitt.
@@ -128,6 +145,7 @@ Zuletzt geprueft: 2026-05-12
 | Video artifacts | 1 |
 | Credit reservations | 1 |
 | Pipeline logs | 23 |
+| Provider jobs | 0 |
 | Objects im `project-source-assets` Bucket | 6 |
 | Enhanced Storage Objects | 1 |
 | Objects im `project-generated-clips` Bucket | 2 |
@@ -161,21 +179,28 @@ Hinweis: Im Storage liegen noch alte Objekte aus frueheren Tests. Cleanup ist no
 - KIE.AI wird ueber Bearer Token (`KIE_API_KEY`) angebunden.
 - KIE.AI Kling 3.0 nutzt `POST /api/v1/jobs/createTask` mit `model: kling-3.0/video`.
 - KIE.AI Tasks sind async: erst `taskId`, danach Callback oder Polling ueber `/api/v1/jobs/recordInfo`.
+- KIE Callback Endpoint: `POST /api/kie/callback`.
+- Optionaler Callback-Schutz: `KIE_CALLBACK_SECRET`, wird als `token` Query-Param an KIE Callback URLs angehaengt und im Endpoint validiert.
 - Runway ist als spaeterer Fallback vorgesehen.
 - Remotion soll als Agent-Tool fuer finale Komposition, Overlays, Logos und Rendering genutzt werden.
 - Der `project-generated-clips` Bucket erlaubt `application/json`, `video/mp4` und `video/quicktime`.
+- `provider_jobs` ist das zentrale Ledger fuer paid Provider Calls, Task IDs, Outputs, Credits und Idempotency Keys.
 
 ## Naechste sinnvolle Schritte
 
-1. Kosten/Provider-Metadaten pro Pipeline-Step besser speichern, z.B. Modell, Output-Groesse, geschaetzte Kosten, Dauer.
-2. Kling-Flow ausbauen:
-   - KIE Task/Provider-Metadaten strukturiert in DB-Spalten oder separater Artifact-Tabelle speichern.
+1. Projektseite weiter erweitern:
+   - Provider-Jobs/Task-IDs intern sichtbar machen.
+   - Live-Polling oder Realtime fuer Status/Logs.
+2. Retry-Flow bewusst bauen:
+   - fehlgeschlagene `provider_jobs` manuell resetten oder erneut freigeben.
+   - UI-Button fuer sicheren Retry pro Step.
+   - klare Warnung, wenn ein Retry erneut Geld kosten kann.
+3. Kosten/Provider-Metadaten pro Pipeline-Step weiter ausbauen, z.B. geschaetzte Gemini-Kosten, Dauer und finale interne Marge.
+4. Kling-Flow ausbauen:
+   - bestehende `provider_jobs` Felder fuer Multi-Shot/mehrere Clips nutzen.
    - Multi-Shot Prompt aus `multi-shot.md` in den echten KIE-Flow einhaengen.
-   - KIE Callback-Endpoint bauen, damit Produktion nicht auf Polling angewiesen ist.
    - Agent-Entscheidung aus `agent.md` spaeter wieder fuer Multi-Shot/Camera-Planning verwenden.
-3. Retry-Flow fuer Pipeline-Steps bauen, besonders fuer Upscaling und Kling.
-4. Cleanup fuer orphaned Storage Assets bauen.
-5. Projekt-Detailseite mit Polling oder Supabase Realtime live machen.
+5. Cleanup fuer orphaned Storage Assets bauen.
 6. Remotion-Step planen und danach bauen:
    - Clips einsammeln.
    - Logo/Overlay/Musik/Voice/Brand-Daten anwenden.

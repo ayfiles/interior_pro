@@ -51,9 +51,71 @@ interface Database {
         Update: never;
         Relationships: [];
       };
+      provider_jobs: {
+        Insert: {
+          credits_consumed?: number | null;
+          error_message?: string | null;
+          estimated_cost_usd?: number | null;
+          external_task_id?: string | null;
+          file_size_bytes?: number | null;
+          idempotency_key: string;
+          model: string;
+          output_storage_key?: string | null;
+          project_id: string;
+          project_image_id?: string | null;
+          provider: string;
+          request?: Json;
+          response?: Json;
+          started_at?: string;
+          status?: string;
+          step: string;
+          submitted_at?: string | null;
+        };
+        Row: {
+          completed_at: string | null;
+          created_at: string;
+          credits_consumed: number | null;
+          error_message: string | null;
+          estimated_cost_usd: number | null;
+          external_task_id: string | null;
+          failed_at: string | null;
+          file_size_bytes: number | null;
+          id: string;
+          idempotency_key: string;
+          model: string;
+          output_storage_key: string | null;
+          project_id: string;
+          project_image_id: string | null;
+          provider: string;
+          request: Json;
+          response: Json;
+          started_at: string;
+          status: string;
+          step: string;
+          submitted_at: string | null;
+          updated_at: string;
+        };
+        Update: {
+          completed_at?: string | null;
+          credits_consumed?: number | null;
+          error_message?: string | null;
+          estimated_cost_usd?: number | null;
+          external_task_id?: string | null;
+          failed_at?: string | null;
+          file_size_bytes?: number | null;
+          output_storage_key?: string | null;
+          request?: Json;
+          response?: Json;
+          status?: string;
+          submitted_at?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
       project_images: {
         Insert: never;
         Row: {
+          analysis: Json | null;
           id: string;
           order_index: number;
           original_storage_key: string;
