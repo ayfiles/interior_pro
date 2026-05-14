@@ -3,10 +3,22 @@ import { STORAGE_BUCKETS } from "@interior-pro/supabase";
 import {
   createKieKling30Task,
   enhanceImageWithNanoBananaPro,
+  generateVoiceoverAudio,
   getKieTaskRecord,
+  runMediaQcOnVideoBytes,
+  type MediaQcReport,
 } from "@interior-pro/pipeline";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import {
+  buildClipSegmentsFromSources,
+  buildEditorStoryPlan,
+  buildFinalEditPlan,
+  buildMusicInstructionPlan,
+  buildSalesPitchRenderManifest,
+  buildVoiceoverPlan,
+  renderSalesPitchVideo,
+} from "@interior-pro/video";
 import { inngest, PROJECT_SUBMITTED_EVENT } from "@/inngest/client";
 import {
   buildProviderJobKey,
@@ -36,6 +48,15 @@ type GeneratedClipResult = {
   skipped: boolean;
   taskId?: string;
 };
+type MediaQcClipResult = {
+  clipStorageKey: string;
+  imageId: string;
+  ok: boolean;
+  orderIndex: number;
+  promptType: string | null;
+  report: MediaQcReport;
+  skipped: boolean;
+};
 
 const IMAGE_REQUIREMENTS = getVideoImageRequirements();
 const UPSCALING_PROMPT_PATH = path.join(
@@ -46,6 +67,22 @@ const SINGLE_SHOT_PROMPT_PATH = path.join(
   process.cwd(),
   "src/inngest/prompts/single-shot.md",
 );
+const EDITOR_PROMPT_PATH = path.join(
+  process.cwd(),
+  "src/inngest/prompts/editor.md",
+);
+const MUSIC_PROMPT_PATH = path.join(
+  process.cwd(),
+  "src/inngest/prompts/music.md",
+);
+const VOICE_PROMPT_PATH = path.join(
+  process.cwd(),
+  "src/inngest/prompts/voice.md",
+);
+const REMOTION_ENTRY_POINT = path.resolve(
+  process.cwd(),
+  "../../packages/video/src/remotion-entry.tsx",
+);
 const KLING_SINGLE_SHOT_TEST_CONFIG = {
   aspectRatio: "16:9" as const,
   durationSeconds: 4,
@@ -55,6 +92,8 @@ const KLING_SINGLE_SHOT_TEST_CONFIG = {
 };
 const KLING_POLL_INTERVAL_SECONDS = 10;
 const KLING_MAX_POLLS = 90;
+const MEDIA_QC_PASSED_VIDEO_STATUS = "qc_passed";
+const MEDIA_QC_FAILED_VIDEO_STATUS = "qc_failed";
 
 function inferImageMimeType(storageKey: string) {
   const lowerKey = storageKey.toLowerCase();
@@ -123,10 +162,111 @@ function isExistingRealClip({
   videoStorageKey: string | null;
 }) {
   return (
-    videoStatus === "clip_generated" &&
+    ["clip_generated", MEDIA_QC_PASSED_VIDEO_STATUS].includes(videoStatus) &&
     Boolean(videoStorageKey) &&
     !videoStorageKey?.endsWith(".json")
   );
+}
+
+function isJsonObject(value: unknown): value is Record<string, Json> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function getExistingMediaQc(analysis: Json | null) {
+  if (!isJsonObject(analysis)) {
+    return null;
+  }
+
+  const mediaQc = analysis.mediaQc;
+
+  if (!isJsonObject(mediaQc)) {
+    return null;
+  }
+
+  return {
+    clipStorageKey:
+      typeof mediaQc.clipStorageKey === "string"
+        ? mediaQc.clipStorageKey
+        : null,
+    report: mediaQc as unknown as MediaQcReport,
+    status: typeof mediaQc.status === "string" ? mediaQc.status : null,
+  };
+}
+
+function mergeMediaQcAnalysis(analysis: Json | null, report: MediaQcReport) {
+  const baseAnalysis = isJsonObject(analysis) ? analysis : {};
+
+  return {
+    ...baseAnalysis,
+    mediaQc: report as unknown as Json,
+  } satisfies Json;
+}
+
+function hasSceneChangeAnalysis(report: MediaQcReport) {
+  return Array.isArray(report.metrics?.sceneChangeSeconds);
+}
+
+function buildFailedMediaQcReport({
+  clipStorageKey,
+  errorMessage,
+  expectedDurationSeconds,
+  fileSizeBytes,
+}: {
+  clipStorageKey: string;
+  errorMessage: string;
+  expectedDurationSeconds: number | null;
+  fileSizeBytes: number;
+}): MediaQcReport {
+  const failedCheck = {
+    message: errorMessage,
+    status: "failed" as const,
+  };
+  const skippedCheck = {
+    message: "Skipped because media inspection could not complete.",
+    status: "skipped" as const,
+  };
+
+  return {
+    checks: {
+      bitrate: skippedCheck,
+      blackFrames: skippedCheck,
+      blur: skippedCheck,
+      codec: failedCheck,
+      duration: skippedCheck,
+      fileSize: {
+        message: `File size is ${fileSizeBytes} bytes.`,
+        status: fileSizeBytes > 0 ? "passed" : "failed",
+      },
+      freezeFrames: skippedCheck,
+      resolution: skippedCheck,
+    },
+    clipStorageKey,
+    expectedDurationSeconds,
+    fileSizeBytes,
+    generatedAt: new Date().toISOString(),
+    issues: [errorMessage],
+    metrics: {
+      audioCodec: null,
+      bitRateBitsPerSecond: null,
+      blackSegments: [],
+      blurFrameScores: [],
+      blurMedianScore: null,
+      codecName: null,
+      durationSeconds: null,
+      formatName: null,
+      frameRate: null,
+      freezeSegments: [],
+      height: null,
+      sceneChangeSeconds: [],
+      width: null,
+    },
+    status: "failed",
+    toolVersions: {
+      ffmpeg: "not-run",
+      ffprobe: "not-run",
+    },
+    warnings: [],
+  };
 }
 
 function getVideoContentType(response: Response) {
@@ -181,6 +321,44 @@ function buildKlingProviderJobKey({
     KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
     KLING_SINGLE_SHOT_TEST_CONFIG.mode,
   ]);
+}
+
+function buildRenderingProviderJobKey(projectId: string, manifestStorageKey: string) {
+  return buildProviderJobKey([
+    "project",
+    projectId,
+    "rendering",
+    "remotion",
+    manifestStorageKey,
+  ]);
+}
+
+function buildFinalOutputStorageKey({
+  organizationId,
+  projectId,
+}: {
+  organizationId: string;
+  projectId: string;
+}) {
+  return `${organizationId}/${projectId}/final/sales-pitch.mp4`;
+}
+
+function buildProjectArtifactStorageKey({
+  extension,
+  name,
+  organizationId,
+  projectId,
+}: {
+  extension: string;
+  name: string;
+  organizationId: string;
+  projectId: string;
+}) {
+  return `${organizationId}/${projectId}/artifacts/${name}.${extension}`;
+}
+
+function extensionForAudioContentType(contentType: string) {
+  return contentType === "audio/mpeg" ? "mp3" : "wav";
 }
 
 function buildProviderResumeBlockMessage(job: ProviderJob) {
@@ -266,6 +444,57 @@ async function updateProjectStatus(projectId: string, status: string) {
   }
 }
 
+async function uploadJsonArtifact({
+  bucket,
+  storageKey,
+  value,
+}: {
+  bucket: string;
+  storageKey: string;
+  value: Json;
+}) {
+  const supabase = createAdminClient();
+  const { error } = await supabase.storage.from(bucket).upload(
+    storageKey,
+    new Blob([JSON.stringify(value, null, 2)], {
+      type: "application/json",
+    }),
+    {
+      contentType: "application/json",
+      upsert: true,
+    },
+  );
+
+  if (error) {
+    throw error;
+  }
+}
+
+async function createSignedStorageUrl({
+  bucket,
+  expiresInSeconds = 60 * 60,
+  storageKey,
+}: {
+  bucket: string;
+  expiresInSeconds?: number;
+  storageKey: string;
+}) {
+  const supabase = createAdminClient();
+  const { data, error } = await supabase.storage
+    .from(bucket)
+    .createSignedUrl(storageKey, expiresInSeconds);
+
+  if (error) {
+    throw error;
+  }
+
+  if (!data?.signedUrl) {
+    throw new Error(`Could not create signed URL for ${bucket}/${storageKey}.`);
+  }
+
+  return data.signedUrl;
+}
+
 export const projectPipeline = inngest.createFunction(
   {
     id: "project-pipeline",
@@ -282,7 +511,7 @@ export const projectPipeline = inngest.createFunction(
       const { data: project, error: projectError } = await supabase
         .from("projects")
         .select(
-          "id, organization_id, status, credit_reservation_id, customer_name, voice_selection, special_notes",
+          "id, organization_id, status, credit_reservation_id, customer_name, customer_logo_storage_key, music_genre, music_id, voice_selection, special_notes",
         )
         .eq("id", projectId)
         .eq("organization_id", organizationId)
@@ -295,7 +524,7 @@ export const projectPipeline = inngest.createFunction(
       const { data: images, error: imagesError } = await supabase
         .from("project_images")
         .select(
-          "id, original_storage_key, upscaled_storage_key, video_storage_key, order_index, prompt_type, video_status",
+          "id, analysis, original_storage_key, upscaled_storage_key, video_storage_key, order_index, prompt_type, video_status",
         )
         .eq("project_id", projectId)
         .order("order_index", { ascending: true });
@@ -341,7 +570,10 @@ export const projectPipeline = inngest.createFunction(
         "validating",
         "upscaling",
         "generating_video",
+        "media_qc",
         "editing",
+        "rendering",
+        "quality_check",
       ].includes(context.project.status)
     ) {
       await step.run("skip-active-project", () =>
@@ -829,8 +1061,17 @@ export const projectPipeline = inngest.createFunction(
       .slice(0, 1);
     const kieCallbackUrl = getKieCallbackUrl();
     const shouldUseKieCallback = Boolean(kieCallbackUrl);
+    const generatedClips: GeneratedClipResult[] = [];
+    const shouldRunVideoGeneration = [
+      "submitted",
+      "queued",
+      "validating",
+      "upscaling",
+      "generating_video",
+    ].includes(context.project.status);
 
-    await step.run("start-video-generation", async () => {
+    if (shouldRunVideoGeneration) {
+      await step.run("start-video-generation", async () => {
       await updateProjectStatus(projectId, "generating_video");
       await writePipelineLog({
         message: "Kling video generation step started.",
@@ -853,16 +1094,14 @@ export const projectPipeline = inngest.createFunction(
         status: "started",
         step: "video_generation",
       });
-    });
+      });
 
-    const singleShotPrompt = await step.run(
-      "load-kling-single-shot-prompt",
-      async () => (await readFile(SINGLE_SHOT_PROMPT_PATH, "utf8")).trim(),
-    );
+      const singleShotPrompt = await step.run(
+        "load-kling-single-shot-prompt",
+        async () => (await readFile(SINGLE_SHOT_PROMPT_PATH, "utf8")).trim(),
+      );
 
-    const generatedClips: GeneratedClipResult[] = [];
-
-    for (const image of videoImages) {
+      for (const image of videoImages) {
       const taskPreparation = await step.run(
         `start-kling-clip-${image.order_index + 1}`,
         async () => {
@@ -1430,62 +1669,925 @@ export const projectPipeline = inngest.createFunction(
       );
 
       generatedClips.push(generatedClip);
-    }
+      }
 
-    const pendingCallbackClips = generatedClips.filter(
-      (clip) => clip.callbackPending,
-    );
+      const pendingCallbackClips = generatedClips.filter(
+        (clip) => clip.callbackPending,
+      );
 
-    if (pendingCallbackClips.length > 0) {
-      await step.run("wait-for-kie-callback", async () => {
+      if (pendingCallbackClips.length > 0) {
+        await step.run("wait-for-kie-callback", async () => {
+          await writePipelineLog({
+            message:
+              "Kling tasks are submitted. Waiting for KIE callbacks to store generated clips.",
+            metadata: {
+              generatedClips,
+              pendingCallbackClips,
+              provider: AI_PROVIDERS.imageToVideo.primary,
+            },
+            projectId,
+            status: "started",
+            step: "video_generation",
+          });
+        });
+
+        return {
+          callbackPending: true,
+          clipCount: generatedClips.length,
+          imageCount: context.images.length,
+          ok: true,
+          projectId,
+          status: "generating_video",
+        };
+      }
+
+      await step.run("complete-video-generation", async () => {
+        await updateProjectStatus(projectId, "media_qc");
         await writePipelineLog({
           message:
-            "Kling tasks are submitted. Waiting for KIE callbacks to store generated clips.",
+            "Kling video generation completed. Clip artifacts are ready for media QC.",
           metadata: {
             generatedClips,
-            pendingCallbackClips,
+            mode: "real",
+            nextStatus: "media_qc",
+            promptPath: SINGLE_SHOT_PROMPT_PATH,
             provider: AI_PROVIDERS.imageToVideo.primary,
           },
           projectId,
-          status: "started",
+          status: "completed",
           step: "video_generation",
+        });
+      });
+    }
+
+    const mediaQcImages = await step.run("load-media-qc-clips", async () => {
+      const supabase = createAdminClient();
+      const { data: images, error } = await supabase
+        .from("project_images")
+        .select(
+          "id, analysis, prompt_type, video_storage_key, video_status, order_index",
+        )
+        .eq("project_id", projectId)
+        .order("order_index", { ascending: true });
+
+      if (error) {
+        throw error;
+      }
+
+      return (images ?? []).filter((image) =>
+        isExistingRealClip({
+          videoStatus: image.video_status,
+          videoStorageKey: image.video_storage_key,
+        }),
+      );
+    });
+    const mediaQcClipResults: MediaQcClipResult[] = [];
+
+    if (mediaQcImages.length === 0) {
+      await step.run("mark-media-qc-missing-clips", async () => {
+        const supabase = createAdminClient();
+        const message = "Media QC could not start because no generated clips were found.";
+
+        await writePipelineLog({
+          message,
+          metadata: {
+            generatedClips,
+            projectStatus: context.project.status,
+          },
+          projectId,
+          status: "failed",
+          step: "media_qc",
+        });
+
+        const { error } = await supabase
+          .from("projects")
+          .update({
+            error_message: message,
+            status: "failed",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", projectId);
+
+        if (error) {
+          throw error;
+        }
+
+        if (context.reservation.status === "reserved") {
+          const { error: reservationError } = await supabase
+            .from("credit_reservations")
+            .update({
+              status: "released",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", context.reservation.id);
+
+          if (reservationError) {
+            throw reservationError;
+          }
+        }
+      });
+
+      return {
+        clipCount: 0,
+        imageCount: context.images.length,
+        ok: false,
+        projectId,
+        status: "failed",
+      };
+    }
+
+    await step.run("start-media-qc", async () => {
+      await updateProjectStatus(projectId, "media_qc");
+      await writePipelineLog({
+        message: "Media QC step started.",
+        metadata: {
+          clipCount: mediaQcImages.length,
+          checks: [
+            "duration",
+            "codec",
+            "black_frames",
+            "freeze_frames",
+            "blur",
+            "bitrate",
+            "resolution",
+            "file_size",
+          ],
+        },
+        projectId,
+        status: "started",
+        step: "media_qc",
+      });
+    });
+
+    for (const image of mediaQcImages) {
+      const mediaQcResult = await step.run(
+        `media-qc-clip-${image.order_index + 1}`,
+        async () => {
+          const supabase = createAdminClient();
+          const clipStorageKey = image.video_storage_key ?? "";
+          const generatedClip = generatedClips.find(
+            (clip) => clip.clipStorageKey === clipStorageKey,
+          );
+          const expectedDurationSeconds =
+            generatedClip?.durationSeconds ??
+            KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds;
+          const existingMediaQc = getExistingMediaQc(image.analysis);
+
+          if (
+            existingMediaQc?.status === "passed" &&
+            existingMediaQc.clipStorageKey === clipStorageKey &&
+            hasSceneChangeAnalysis(existingMediaQc.report)
+          ) {
+            if (image.video_status !== MEDIA_QC_PASSED_VIDEO_STATUS) {
+              const { error: updateError } = await supabase
+                .from("project_images")
+                .update({
+                  video_status: MEDIA_QC_PASSED_VIDEO_STATUS,
+                })
+                .eq("id", image.id);
+
+              if (updateError) {
+                throw updateError;
+              }
+            }
+
+            await writePipelineLog({
+              message: `Clip ${image.order_index + 1} already passed media QC. Skipping re-inspection.`,
+              metadata: {
+                clipStorageKey,
+                imageId: image.id,
+              },
+              projectId,
+              status: "skipped",
+              step: "media_qc",
+            });
+
+            return {
+              clipStorageKey,
+              imageId: image.id,
+              ok: true,
+              orderIndex: image.order_index,
+              promptType: image.prompt_type,
+              report: existingMediaQc.report,
+              skipped: true,
+            };
+          }
+
+          let clipBytes = new Uint8Array();
+          let report: MediaQcReport;
+
+          try {
+            const { data: clipFile, error: downloadError } =
+              await supabase.storage
+                .from(STORAGE_BUCKETS.generatedClips)
+                .download(clipStorageKey);
+
+            if (downloadError) {
+              throw downloadError;
+            }
+
+            clipBytes = new Uint8Array(await clipFile.arrayBuffer());
+            report = await runMediaQcOnVideoBytes({
+              clipStorageKey,
+              expectedDurationSeconds,
+              videoBytes: clipBytes,
+            });
+          } catch (error) {
+            report = buildFailedMediaQcReport({
+              clipStorageKey,
+              errorMessage: getErrorMessage(error),
+              expectedDurationSeconds,
+              fileSizeBytes: clipBytes.byteLength,
+            });
+          }
+
+          const ok = report.status === "passed";
+          const { error: updateError } = await supabase
+            .from("project_images")
+            .update({
+              analysis: mergeMediaQcAnalysis(image.analysis, report),
+              video_status: ok
+                ? MEDIA_QC_PASSED_VIDEO_STATUS
+                : MEDIA_QC_FAILED_VIDEO_STATUS,
+            })
+            .eq("id", image.id);
+
+          if (updateError) {
+            throw updateError;
+          }
+
+          await writePipelineLog({
+            message: ok
+              ? `Clip ${image.order_index + 1} passed media QC.`
+              : `Clip ${image.order_index + 1} failed media QC.`,
+            metadata: {
+              clipStorageKey,
+              imageId: image.id,
+              report: report as unknown as Json,
+            },
+            projectId,
+            status: ok ? "completed" : "failed",
+            step: "media_qc",
+          });
+
+          return {
+            clipStorageKey,
+            imageId: image.id,
+            ok,
+            orderIndex: image.order_index,
+            promptType: image.prompt_type,
+            report,
+            skipped: false,
+          };
+        },
+      );
+
+      mediaQcClipResults.push(mediaQcResult);
+    }
+
+    const failedMediaQcClips = mediaQcClipResults.filter((clip) => !clip.ok);
+
+    if (failedMediaQcClips.length > 0) {
+      await step.run("mark-media-qc-failed", async () => {
+        const supabase = createAdminClient();
+        const firstIssue =
+          failedMediaQcClips[0]?.report.issues[0] ??
+          "At least one clip failed media QC.";
+        const message = `${failedMediaQcClips.length} clip${
+          failedMediaQcClips.length === 1 ? "" : "s"
+        } failed media QC. ${firstIssue}`;
+
+        const { error } = await supabase
+          .from("projects")
+          .update({
+            error_message: message,
+            status: "failed",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", projectId);
+
+        if (error) {
+          throw error;
+        }
+
+        if (context.reservation.status === "reserved") {
+          const { error: reservationError } = await supabase
+            .from("credit_reservations")
+            .update({
+              status: "released",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", context.reservation.id);
+
+          if (reservationError) {
+            throw reservationError;
+          }
+        }
+
+        await writePipelineLog({
+          message,
+          metadata: {
+            failedClipCount: failedMediaQcClips.length,
+            mediaQcClipResults: mediaQcClipResults as unknown as Json,
+            reservationReleased: context.reservation.status === "reserved",
+          },
+          projectId,
+          status: "failed",
+          step: "media_qc",
         });
       });
 
       return {
-        callbackPending: true,
-        clipCount: generatedClips.length,
+        clipCount: mediaQcClipResults.length,
+        failedClipCount: failedMediaQcClips.length,
         imageCount: context.images.length,
-        ok: true,
+        ok: false,
         projectId,
-        status: "generating_video",
+        status: "failed",
       };
     }
 
-    await step.run("complete-video-generation", async () => {
+    await step.run("complete-media-qc", async () => {
       await updateProjectStatus(projectId, "editing");
       await writePipelineLog({
-        message:
-          "Kling video generation completed. Clip artifacts are ready for editing.",
+        message: "Media QC completed. Clips are ready for the editor/rendering stage.",
         metadata: {
-          generatedClips,
-          mode: "real",
+          mediaQcClipResults: mediaQcClipResults as unknown as Json,
           nextStatus: "editing",
-          promptPath: SINGLE_SHOT_PROMPT_PATH,
-          provider: AI_PROVIDERS.imageToVideo.primary,
         },
         projectId,
         status: "completed",
-        step: "video_generation",
+        step: "media_qc",
+      });
+    });
+
+    const editorInstructions = await step.run("load-editor-instructions", async () => ({
+      editor: await readFile(EDITOR_PROMPT_PATH, "utf8").catch(() => ""),
+      music: await readFile(MUSIC_PROMPT_PATH, "utf8").catch(() => ""),
+      voice: await readFile(VOICE_PROMPT_PATH, "utf8").catch(() => ""),
+    }));
+    const projectPlanningInput = {
+      customerName: context.project.customer_name,
+      musicGenre: context.project.music_genre,
+      projectId,
+      salesNotes: context.project.special_notes,
+      voiceSelection: context.project.voice_selection,
+    };
+    const clipSegments = await step.run("segment-qc-clips", async () => {
+      const segments = buildClipSegmentsFromSources(
+        mediaQcClipResults.map((clip) => ({
+          clipStorageKey: clip.clipStorageKey,
+          durationSeconds: clip.report.metrics.durationSeconds,
+          imageId: clip.imageId,
+          orderIndex: clip.orderIndex,
+          promptType: clip.promptType,
+          sceneChangeSeconds: clip.report.metrics.sceneChangeSeconds,
+        })),
+      );
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: "json",
+        name: "clip-segments",
+        organizationId,
+        projectId,
+      });
+
+      await uploadJsonArtifact({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        storageKey,
+        value: segments as unknown as Json,
+      });
+      await writePipelineLog({
+        message: `Editor segmentation prepared ${segments.length} clip segment${segments.length === 1 ? "" : "s"}.`,
+        metadata: {
+          editorInstructionsLoaded: Boolean(editorInstructions.editor),
+          segments: segments as unknown as Json,
+          storageKey,
+        },
+        projectId,
+        status: "completed",
+        step: "clip_segmentation",
+      });
+
+      return segments;
+    });
+    const storyPlan = await step.run("build-editor-story-plan", async () => {
+      const plan = buildEditorStoryPlan({
+        project: projectPlanningInput,
+        segments: clipSegments,
+      });
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: "json",
+        name: "editor-story-plan",
+        organizationId,
+        projectId,
+      });
+
+      await uploadJsonArtifact({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        storageKey,
+        value: plan as unknown as Json,
+      });
+      await writePipelineLog({
+        message: "Editor story plan prepared from the QC-approved clip pool.",
+        metadata: {
+          plan: plan as unknown as Json,
+          storageKey,
+        },
+        projectId,
+        status: "completed",
+        step: "editing",
+      });
+
+      return plan;
+    });
+    const voiceoverPlan = await step.run("build-voiceover-script", async () => {
+      const plan = buildVoiceoverPlan({
+        project: projectPlanningInput,
+        storyPlan,
+      });
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: "json",
+        name: "voiceover-plan",
+        organizationId,
+        projectId,
+      });
+
+      await uploadJsonArtifact({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        storageKey,
+        value: plan as unknown as Json,
+      });
+      await writePipelineLog({
+        message: "Voiceover script prepared from the visual story plan.",
+        metadata: {
+          plan: plan as unknown as Json,
+          storageKey,
+          voiceInstructionsLoaded: Boolean(editorInstructions.voice),
+        },
+        projectId,
+        status: "completed",
+        step: "voiceover",
+      });
+
+      return plan;
+    });
+    const voiceoverAsset = await step.run("generate-voiceover-audio", async () => {
+      const voiceover = await generateVoiceoverAudio({
+        script: voiceoverPlan.script,
+        targetDurationSeconds: voiceoverPlan.targetDurationSeconds,
+        voiceSelection: voiceoverPlan.voiceSelection,
+      });
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: extensionForAudioContentType(voiceover.contentType),
+        name: "voiceover",
+        organizationId,
+        projectId,
+      });
+      const supabase = createAdminClient();
+      const { error } = await supabase.storage
+        .from(STORAGE_BUCKETS.finalOutputs)
+        .upload(
+          storageKey,
+          new Blob([voiceover.audioBytes], {
+            type: voiceover.contentType,
+          }),
+          {
+            contentType: voiceover.contentType,
+            upsert: true,
+          },
+        );
+
+      if (error) {
+        throw error;
+      }
+
+      await writePipelineLog({
+        message:
+          voiceover.provider === "elevenlabs"
+            ? "Voiceover audio generated with ElevenLabs."
+            : "Placeholder voiceover audio generated because ElevenLabs is not configured.",
+        metadata: {
+          durationSeconds: voiceover.durationSeconds,
+          model: voiceover.model,
+          provider: voiceover.provider,
+          storageKey,
+          voiceId: voiceover.voiceId,
+        },
+        projectId,
+        status: "completed",
+        step: "voiceover",
+      });
+
+      return {
+        contentType: voiceover.contentType,
+        durationSeconds: voiceover.durationSeconds,
+        model: voiceover.model,
+        provider: voiceover.provider,
+        storageKey,
+        voiceId: voiceover.voiceId,
+      };
+    });
+    const musicContext = await step.run("load-music-context", async () => {
+      const supabase = createAdminClient();
+
+      if (context.project.music_genre === "no_music") {
+        return {
+          durationSeconds: null,
+          name: null,
+          storageKey: null,
+        };
+      }
+
+      const { data, error } = await supabase
+        .from("music_tracks")
+        .select("duration_seconds, file_storage_key, name")
+        .eq("genre", context.project.music_genre)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
+      return {
+        durationSeconds: data?.duration_seconds ?? null,
+        name: data?.name ?? null,
+        storageKey: data?.file_storage_key ?? null,
+      };
+    });
+    const musicPlan = await step.run("build-music-instruction-plan", async () => {
+      const plan = buildMusicInstructionPlan({
+        musicGenre: context.project.music_genre,
+        trackDurationSeconds: musicContext.durationSeconds,
+        trackName: musicContext.name,
+        trackStorageKey: musicContext.storageKey,
+      });
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: "json",
+        name: "music-plan",
+        organizationId,
+        projectId,
+      });
+
+      await uploadJsonArtifact({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        storageKey,
+        value: plan as unknown as Json,
+      });
+      await writePipelineLog({
+        message: musicContext.storageKey
+          ? "Music instruction plan loaded for the selected track."
+          : "Music instruction plan prepared without a configured music file.",
+        metadata: {
+          musicInstructionsLoaded: Boolean(editorInstructions.music),
+          plan: plan as unknown as Json,
+          storageKey,
+        },
+        projectId,
+        status: "completed",
+        step: "music",
+      });
+
+      return plan;
+    });
+    const finalEditPlan = await step.run("build-final-edit-plan", async () => {
+      const plan = buildFinalEditPlan({
+        music: musicPlan,
+        segments: clipSegments,
+        voiceover: voiceoverPlan,
+        voiceoverDurationSeconds: voiceoverAsset.durationSeconds,
+      });
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: "json",
+        name: "final-edit-plan",
+        organizationId,
+        projectId,
+      });
+
+      await uploadJsonArtifact({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        storageKey,
+        value: plan as unknown as Json,
+      });
+      await writePipelineLog({
+        message: "Final edit plan prepared against music cut points and voiceover duration.",
+        metadata: {
+          durationSeconds: plan.durationSeconds,
+          sceneCount: plan.scenes.length,
+          storageKey,
+        },
+        projectId,
+        status: "completed",
+        step: "editing",
+      });
+
+      return plan;
+    });
+    const renderManifest = await step.run("build-render-manifest", async () => {
+      const clipSignedUrls = new Map<string, string>();
+      const uniqueClipStorageKeys = Array.from(
+        new Set(finalEditPlan.scenes.map((scene) => scene.clipStorageKey)),
+      );
+
+      for (const clipStorageKey of uniqueClipStorageKeys) {
+        clipSignedUrls.set(
+          clipStorageKey,
+          await createSignedStorageUrl({
+            bucket: STORAGE_BUCKETS.generatedClips,
+            expiresInSeconds: 60 * 60,
+            storageKey: clipStorageKey,
+          }),
+        );
+      }
+
+      const voiceoverSignedUrl = await createSignedStorageUrl({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        expiresInSeconds: 60 * 60,
+        storageKey: voiceoverAsset.storageKey,
+      });
+      const musicSignedUrl = musicContext.storageKey
+        ? await createSignedStorageUrl({
+            bucket: STORAGE_BUCKETS.musicTracks,
+            expiresInSeconds: 60 * 60,
+            storageKey: musicContext.storageKey,
+          })
+        : null;
+      const logoSignedUrl = context.project.customer_logo_storage_key
+        ? await createSignedStorageUrl({
+            bucket: STORAGE_BUCKETS.sourceAssets,
+            expiresInSeconds: 60 * 60,
+            storageKey: context.project.customer_logo_storage_key,
+          })
+        : null;
+      const manifest = buildSalesPitchRenderManifest({
+        clipSignedUrls,
+        editPlan: finalEditPlan,
+        logoSignedUrl,
+        musicSignedUrl,
+        project: projectPlanningInput,
+        voiceoverDurationSeconds: voiceoverAsset.durationSeconds,
+        voiceoverSignedUrl,
+      });
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: "json",
+        name: "render-manifest",
+        organizationId,
+        projectId,
+      });
+
+      await uploadJsonArtifact({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        storageKey,
+        value: manifest as unknown as Json,
+      });
+      await writePipelineLog({
+        message: "Render manifest prepared for Remotion.",
+        metadata: {
+          sceneCount: manifest.scenes.length,
+          storageKey,
+        },
+        projectId,
+        status: "completed",
+        step: "rendering",
+      });
+
+      return {
+        manifest,
+        storageKey,
+      };
+    });
+    const renderedVideo = await step.run("render-remotion-video", async () => {
+      const finalOutputStorageKey = buildFinalOutputStorageKey({
+        organizationId,
+        projectId,
+      });
+      const providerJob = await ensureProviderJob({
+        idempotencyKey: buildRenderingProviderJobKey(
+          projectId,
+          renderManifest.storageKey,
+        ),
+        model: "SalesPitch",
+        outputStorageKey: finalOutputStorageKey,
+        projectId,
+        provider: "remotion",
+        request: {
+          compositionId: "SalesPitch",
+          entryPoint: REMOTION_ENTRY_POINT,
+          manifestStorageKey: renderManifest.storageKey,
+        },
+        step: "rendering",
+      });
+      const supabase = createAdminClient();
+
+      await updateProjectStatus(projectId, "rendering");
+      await writePipelineLog({
+        message: "Remotion rendering started.",
+        metadata: {
+          finalOutputStorageKey,
+          providerJobId: providerJob.job.id,
+        },
+        projectId,
+        status: "started",
+        step: "rendering",
+      });
+
+      try {
+        const renderResult = await renderSalesPitchVideo({
+          entryPoint: REMOTION_ENTRY_POINT,
+          manifest: renderManifest.manifest,
+        });
+        const outputArrayBuffer = renderResult.outputBytes.buffer.slice(
+          renderResult.outputBytes.byteOffset,
+          renderResult.outputBytes.byteOffset + renderResult.outputBytes.byteLength,
+        ) as ArrayBuffer;
+        const { error: uploadError } = await supabase.storage
+          .from(STORAGE_BUCKETS.finalOutputs)
+          .upload(
+            finalOutputStorageKey,
+            new Blob([outputArrayBuffer], {
+              type: renderResult.contentType,
+            }),
+            {
+              contentType: renderResult.contentType,
+              upsert: true,
+            },
+          );
+
+        if (uploadError) {
+          throw uploadError;
+        }
+
+        await updateProviderJob(providerJob.job.id, {
+          completed_at: new Date().toISOString(),
+          file_size_bytes: renderResult.outputBytes.byteLength,
+          output_storage_key: finalOutputStorageKey,
+          response: {
+            contentType: renderResult.contentType,
+            durationSeconds: renderResult.durationSeconds,
+            fileSizeBytes: renderResult.outputBytes.byteLength,
+          },
+          status: "completed",
+        });
+        await writePipelineLog({
+          message: "Remotion render completed and final MP4 was stored.",
+          metadata: {
+            durationSeconds: renderResult.durationSeconds,
+            fileSizeBytes: renderResult.outputBytes.byteLength,
+            finalOutputStorageKey,
+            providerJobId: providerJob.job.id,
+          },
+          projectId,
+          status: "completed",
+          step: "rendering",
+        });
+
+        return {
+          contentType: renderResult.contentType,
+          durationSeconds: renderResult.durationSeconds,
+          fileSizeBytes: renderResult.outputBytes.byteLength,
+          storageKey: finalOutputStorageKey,
+        };
+      } catch (error) {
+        await updateProviderJob(providerJob.job.id, {
+          error_message: getErrorMessage(error),
+          failed_at: new Date().toISOString(),
+          status: "requires_manual_retry",
+        });
+
+        throw error;
+      }
+    });
+    const finalQcReport = await step.run("quality-check-final-video", async () => {
+      const supabase = createAdminClient();
+
+      await updateProjectStatus(projectId, "quality_check");
+      const { data: finalVideo, error: downloadError } = await supabase.storage
+        .from(STORAGE_BUCKETS.finalOutputs)
+        .download(renderedVideo.storageKey);
+
+      if (downloadError) {
+        throw downloadError;
+      }
+
+      return runMediaQcOnVideoBytes({
+        clipStorageKey: renderedVideo.storageKey,
+        expectedDurationSeconds: renderManifest.manifest.durationSeconds,
+        videoBytes: new Uint8Array(await finalVideo.arrayBuffer()),
+      });
+    });
+
+    if (finalQcReport.status !== "passed") {
+      await step.run("mark-final-qc-failed", async () => {
+        const supabase = createAdminClient();
+        const message =
+          finalQcReport.issues[0] ?? "Final rendered video failed QC.";
+
+        await supabase
+          .from("projects")
+          .update({
+            error_message: message,
+            status: "failed",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", projectId)
+          .throwOnError();
+
+        if (context.reservation.status === "reserved") {
+          await supabase
+            .from("credit_reservations")
+            .update({
+              status: "released",
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", context.reservation.id)
+            .throwOnError();
+        }
+
+        await writePipelineLog({
+          message,
+          metadata: {
+            finalQcReport: finalQcReport as unknown as Json,
+          },
+          projectId,
+          status: "failed",
+          step: "quality_check",
+        });
+      });
+
+      return {
+        clipCount: mediaQcClipResults.length,
+        imageCount: context.images.length,
+        ok: false,
+        projectId,
+        status: "failed",
+      };
+    }
+
+    await step.run("complete-project", async () => {
+      const supabase = createAdminClient();
+
+      await supabase
+          .from("project_outputs")
+          .insert({
+            duration_seconds: finalQcReport.metrics.durationSeconds,
+            file_size_bytes: renderedVideo.fileSizeBytes,
+          project_id: projectId,
+          qc_report: {
+            finalQcReport,
+            renderManifestStorageKey: renderManifest.storageKey,
+          },
+          resolution: `${finalQcReport.metrics.width ?? 1920}x${
+            finalQcReport.metrics.height ?? 1080
+          }`,
+          video_storage_key: renderedVideo.storageKey,
+          voiceover_script: voiceoverPlan.script,
+        })
+        .throwOnError();
+
+      if (context.reservation.status === "reserved") {
+        await supabase
+          .from("credit_reservations")
+          .update({
+            status: "consumed",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", context.reservation.id)
+          .throwOnError();
+      }
+
+      await supabase
+        .from("projects")
+        .update({
+          completed_at: new Date().toISOString(),
+          error_message: null,
+          status: "completed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", projectId)
+        .throwOnError();
+
+      await writePipelineLog({
+        message: "Project completed with final MP4 output.",
+        metadata: {
+          finalOutputStorageKey: renderedVideo.storageKey,
+          finalQcReport: finalQcReport as unknown as Json,
+          reservationConsumed: context.reservation.status === "reserved",
+        },
+        projectId,
+        status: "completed",
+        step: "delivery",
       });
     });
 
     return {
-      clipCount: generatedClips.length,
+      clipCount: mediaQcClipResults.length,
+      finalOutputStorageKey: renderedVideo.storageKey,
       imageCount: context.images.length,
       ok: true,
       projectId,
-      status: "editing",
+      status: "completed",
     };
   },
 );

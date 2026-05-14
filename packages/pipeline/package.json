@@ -13,6 +13,8 @@
     "test": "echo \"No tests yet\""
   },
   "dependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "@ffprobe-installer/ffprobe": "^2.1.2",
     "@interior-pro/shared": "workspace:*",
     "zod": "^4.2.1"
   },

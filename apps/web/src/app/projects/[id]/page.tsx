@@ -46,6 +46,14 @@ interface ProjectImageRow {
   video_status: string;
 }
 
+interface ProjectOutputRow {
+  created_at: string;
+  duration_seconds: number | null;
+  id: string;
+  resolution: string;
+  video_storage_key: string;
+}
+
 interface PipelineLogRow {
   created_at: string;
   id: string;
@@ -96,6 +104,13 @@ export default async function ProjectPage({
     .eq("project_id", id)
     .order("created_at", { ascending: false });
 
+  const { data: outputs } = await supabase
+    .from("project_outputs")
+    .select("id, video_storage_key, duration_seconds, resolution, created_at")
+    .eq("project_id", id)
+    .order("created_at", { ascending: false })
+    .limit(1);
+
   const { data: reservations } = await supabase
     .from("credit_reservations")
     .select("status, expires_at")
@@ -127,6 +142,12 @@ export default async function ProjectPage({
   const typedProject = project as ProjectRow;
   const latestReservation = reservations?.[0];
   const generatedClips = signedImages.filter((image) => image.clipSignedUrl);
+  const latestOutput = outputs?.[0] as ProjectOutputRow | undefined;
+  const { data: finalVideoData } = latestOutput
+    ? await supabase.storage
+        .from(STORAGE_BUCKETS.finalOutputs)
+        .createSignedUrl(latestOutput.video_storage_key, 60 * 10)
+    : { data: null };
 
   return (
     <main className="app-shell fine-grid min-h-screen px-4 py-6 text-[var(--foreground)] sm:px-6 lg:px-8">
@@ -175,6 +196,34 @@ export default async function ProjectPage({
 
         <section className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_360px]">
           <div className="grid gap-5">
+            {finalVideoData?.signedUrl ? (
+              <section className="rounded-lg border border-[var(--line)] bg-[rgba(20,17,14,0.86)] p-5">
+                <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="grid size-10 place-items-center rounded-lg border border-[var(--brass)]/35 bg-black/25 text-[var(--brass)]">
+                      <PlayCircle className="size-5" />
+                    </div>
+                    <div>
+                      <p className="text-sm text-[var(--muted)]">Final video</p>
+                      <h2 className="text-2xl font-semibold">Sales film ready</h2>
+                    </div>
+                  </div>
+                  <span className="rounded-md border border-white/10 bg-black/25 px-3 py-2 text-sm text-[var(--stone)]">
+                    {latestOutput?.resolution ?? "1920x1080"}
+                  </span>
+                </div>
+                <div className="overflow-hidden rounded-lg border border-white/10 bg-black/25">
+                  <video
+                    className="aspect-video w-full bg-[#0f0c09] object-contain"
+                    controls
+                    playsInline
+                    preload="metadata"
+                    src={finalVideoData.signedUrl}
+                  />
+                </div>
+              </section>
+            ) : null}
+
             <section className="rounded-lg border border-[var(--line)] bg-[rgba(20,17,14,0.86)] p-5">
               <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">

@@ -51,6 +51,19 @@ interface Database {
         Update: never;
         Relationships: [];
       };
+      music_tracks: {
+        Insert: never;
+        Row: {
+          duration_seconds: number;
+          file_storage_key: string;
+          genre: string | null;
+          id: string;
+          is_active: boolean;
+          name: string;
+        };
+        Update: never;
+        Relationships: [];
+      };
       provider_jobs: {
         Insert: {
           credits_consumed?: number | null;
@@ -133,19 +146,47 @@ interface Database {
         };
         Relationships: [];
       };
+      project_outputs: {
+        Insert: {
+          duration_seconds?: number | null;
+          file_size_bytes?: number | null;
+          project_id: string;
+          qc_report?: Json;
+          resolution?: string;
+          thumbnail_storage_key?: string | null;
+          video_storage_key: string;
+          voiceover_script?: string | null;
+        };
+        Row: {
+          duration_seconds: number | null;
+          file_size_bytes: number | null;
+          id: string;
+          project_id: string;
+          qc_report: Json;
+          resolution: string;
+          thumbnail_storage_key: string | null;
+          video_storage_key: string;
+          voiceover_script: string | null;
+        };
+        Update: never;
+        Relationships: [];
+      };
       projects: {
         Insert: never;
         Row: {
+          customer_logo_storage_key: string | null;
           credit_reservation_id: string | null;
           customer_name: string;
           id: string;
           music_genre: string;
+          music_id: string | null;
           organization_id: string;
           special_notes: string | null;
           status: string;
           voice_selection: string;
         };
         Update: {
+          completed_at?: string | null;
           error_message?: string | null;
           status?: string;
           updated_at?: string;

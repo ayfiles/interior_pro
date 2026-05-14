@@ -3,6 +3,7 @@ import { STORAGE_BUCKETS } from "@interior-pro/supabase";
 import { getKieTaskRecord } from "@interior-pro/pipeline";
 import {
   KIE_CALLBACK_RECEIVED_EVENT,
+  PROJECT_SUBMITTED_EVENT,
   type KieCallbackReceivedEventData,
   inngest,
 } from "@/inngest/client";
@@ -104,8 +105,19 @@ export const kieCallbackProcessor = inngest.createFunction(
         throw imageError;
       }
 
+      const { data: project, error: projectError } = await supabase
+        .from("projects")
+        .select("organization_id")
+        .eq("id", providerJob.project_id)
+        .single();
+
+      if (projectError) {
+        throw projectError;
+      }
+
       return {
         image: image as ProjectImageRow,
+        project,
         providerJob,
       };
     });
@@ -326,7 +338,7 @@ export const kieCallbackProcessor = inngest.createFunction(
           .from("projects")
           .update({
             error_message: null,
-            status: "editing",
+            status: "media_qc",
             updated_at: new Date().toISOString(),
           })
           .eq("id", context.providerJob.project_id);
@@ -393,10 +405,20 @@ export const kieCallbackProcessor = inngest.createFunction(
       }
     });
 
+    await step.sendEvent("resume-project-media-qc", {
+      name: PROJECT_SUBMITTED_EVENT,
+      data: {
+        imageCount: 1,
+        organizationId: context.project.organization_id,
+        projectId: context.providerJob.project_id,
+        submittedBy: "kie-callback-processor",
+      },
+    });
+
     return {
       ...generatedClip,
       ok: true,
-      status: "editing",
+      status: "media_qc",
     };
   },
 );

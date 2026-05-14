@@ -17,6 +17,13 @@ const nextConfig: NextConfig = {
     "@interior-pro/supabase",
     "@interior-pro/billing",
     "@interior-pro/pipeline",
+    "@interior-pro/video",
+  ],
+  serverExternalPackages: [
+    "@ffmpeg-installer/ffmpeg",
+    "@ffprobe-installer/ffprobe",
+    "@remotion/bundler",
+    "@remotion/renderer",
   ],
   images: {
     remotePatterns: [
