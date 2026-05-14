@@ -8,7 +8,6 @@ import {
   runMediaQcOnVideoBytes,
   type MediaQcReport,
 } from "@interior-pro/pipeline";
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import {
   buildClipSegmentsFromSources,
@@ -27,6 +26,7 @@ import {
   updateProviderJob,
   type ProviderJob,
 } from "@/inngest/provider-jobs";
+import { loadPipelinePrompt } from "@/lib/admin/prompts";
 import { createAdminClient, type Json } from "@/lib/supabase/admin";
 
 type PipelineLogStatus = "started" | "completed" | "failed" | "skipped";
@@ -66,18 +66,6 @@ const UPSCALING_PROMPT_PATH = path.join(
 const SINGLE_SHOT_PROMPT_PATH = path.join(
   process.cwd(),
   "src/inngest/prompts/single-shot.md",
-);
-const EDITOR_PROMPT_PATH = path.join(
-  process.cwd(),
-  "src/inngest/prompts/editor.md",
-);
-const MUSIC_PROMPT_PATH = path.join(
-  process.cwd(),
-  "src/inngest/prompts/music.md",
-);
-const VOICE_PROMPT_PATH = path.join(
-  process.cwd(),
-  "src/inngest/prompts/voice.md",
 );
 const REMOTION_ENTRY_POINT = path.resolve(
   process.cwd(),
@@ -730,7 +718,7 @@ export const projectPipeline = inngest.createFunction(
         "load-upscaling-prompt",
         async () =>
           buildUpscalingPrompt(
-            await readFile(UPSCALING_PROMPT_PATH, "utf8"),
+            await loadPipelinePrompt("upscaling"),
             context.project.special_notes,
           ),
       );
@@ -1098,7 +1086,7 @@ export const projectPipeline = inngest.createFunction(
 
       const singleShotPrompt = await step.run(
         "load-kling-single-shot-prompt",
-        async () => (await readFile(SINGLE_SHOT_PROMPT_PATH, "utf8")).trim(),
+        async () => loadPipelinePrompt("single-shot"),
       );
 
       for (const image of videoImages) {
@@ -2022,9 +2010,9 @@ export const projectPipeline = inngest.createFunction(
     });
 
     const editorInstructions = await step.run("load-editor-instructions", async () => ({
-      editor: await readFile(EDITOR_PROMPT_PATH, "utf8").catch(() => ""),
-      music: await readFile(MUSIC_PROMPT_PATH, "utf8").catch(() => ""),
-      voice: await readFile(VOICE_PROMPT_PATH, "utf8").catch(() => ""),
+      editor: await loadPipelinePrompt("editor").catch(() => ""),
+      music: await loadPipelinePrompt("music").catch(() => ""),
+      voice: await loadPipelinePrompt("voice").catch(() => ""),
     }));
     const projectPlanningInput = {
       customerName: context.project.customer_name,
