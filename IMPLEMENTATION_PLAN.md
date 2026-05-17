@@ -409,11 +409,13 @@ graph LR
         VALIDATE["Validate Inputs<br/>+ NSFW Check"]
     end
     
-    VALIDATE -->|"PASS"| UPSCALE
+    VALIDATE -->|"PASS"| UPSCALE_ANALYZE
     VALIDATE -->|"FAIL"| RELEASE["Release Reservation<br/>+ Error Response"]
     
     subgraph "Step 2: Upscaler"
+        UPSCALE_ANALYZE["Enhancement Agent<br/>Image Preservation Brief"]
         UPSCALE["Nano Banana Pro<br/>Enhance + Upscale Images"]
+        UPSCALE_ANALYZE --> UPSCALE
     end
     
     UPSCALE --> ANALYZE
@@ -475,11 +477,16 @@ MD:     supervisor.md (validation rules)
 ```
 Input:  Validated images from DB
 Action:
-  1. Send each image to Nano Banana Pro (`gemini-3-pro-image-preview`) with a furniture-safe enhancement prompt
-  2. Enhance materials, lighting, and composition while preserving product geometry and brand-relevant details
-  3. Generate 2K/4K output as required by the video provider
-  4. Store enhanced/upscaled images back to private Supabase Storage
+  1. Analyze each source image with the Enhancement Agent prompt (`enhancement-agent.md`)
+  2. Extract conservative preservation facts: light on/off states, object colors, surface materials, object states, geometry locks, and high-risk details
+  3. Store the structured preservation brief in `project_images.analysis.enhancementBrief`
+  4. Merge the master upscaling prompt, the image-specific preservation brief, and non-conflicting client notes
+  5. Send each image to Nano Banana Pro (`gemini-3-pro-image-preview`) with the merged image-specific prompt
+  6. Enhance materials, lighting, and composition while preserving product geometry and brand-relevant details
+  7. Generate 2K/4K output as required by the video provider
+  8. Store enhanced/upscaled images back to private Supabase Storage
 Output: Upscaled storage keys in DB
+MD:     enhancement-agent.md + upscaling.md
 ```
 
 #### Step 3: Video Agent
@@ -855,6 +862,7 @@ NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY=
 # AI Services
 OPENAI_API_KEY=           # Moderation + LLM agent brain
 GEMINI_API_KEY=           # Nano Banana Pro image enhancement/upscaling
+GEMINI_IMAGE_ANALYSIS_MODEL=gemini-2.5-pro # Optional Enhancement Agent model
 KLING_API_KEY=            # Primary image-to-video generation via Kling 3.0
 RUNWAY_API_KEY=           # Fallback image-to-video generation
 MAGNIFIC_API_KEY=         # Optional fallback image upscaling

@@ -1,11 +1,13 @@
 import { AI_PROVIDERS, getVideoImageRequirements } from "@interior-pro/shared";
 import { STORAGE_BUCKETS } from "@interior-pro/supabase";
 import {
+  analyzeImageForEnhancement,
   createKieKling30Task,
   enhanceImageWithNanoBananaPro,
   generateVoiceoverAudio,
   getKieTaskRecord,
   runMediaQcOnVideoBytes,
+  type ImageEnhancementAnalysisResult,
   type MediaQcReport,
 } from "@interior-pro/pipeline";
 import path from "node:path";
@@ -62,6 +64,10 @@ const IMAGE_REQUIREMENTS = getVideoImageRequirements();
 const UPSCALING_PROMPT_PATH = path.join(
   process.cwd(),
   "src/inngest/prompts/upscaling.md",
+);
+const ENHANCEMENT_AGENT_PROMPT_PATH = path.join(
+  process.cwd(),
+  "src/inngest/prompts/enhancement-agent.md",
 );
 const SINGLE_SHOT_PROMPT_PATH = path.join(
   process.cwd(),
@@ -124,12 +130,28 @@ function buildEnhancedStorageKey(sourceStorageKey: string, mimeType: string) {
   return `${enhancedKey}.${extension}`;
 }
 
-function buildUpscalingPrompt(markdown: string, notes: string | null) {
-  if (!notes) {
-    return markdown;
-  }
-
-  return `${markdown}\n\nCLIENT NOTES:\n${notes}`;
+function buildUpscalingPrompt({
+  markdown,
+  notes,
+  preservationPrompt,
+}: {
+  markdown: string;
+  notes: string | null;
+  preservationPrompt?: string | null;
+}) {
+  return [
+    markdown,
+    preservationPrompt,
+    notes
+      ? [
+          "CLIENT NOTES:",
+          "Use these notes only when they do not conflict with the reference image or the image-specific preservation brief.",
+          notes,
+        ].join("\n")
+      : null,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function buildClipStorageKey(enhancedStorageKey: string) {
@@ -181,6 +203,29 @@ function getExistingMediaQc(analysis: Json | null) {
   };
 }
 
+function getExistingEnhancementBrief(analysis: Json | null) {
+  if (!isJsonObject(analysis)) {
+    return null;
+  }
+
+  const enhancementBrief = analysis.enhancementBrief;
+
+  if (!isJsonObject(enhancementBrief)) {
+    return null;
+  }
+
+  return {
+    promptInsert:
+      typeof enhancementBrief.promptInsert === "string"
+        ? enhancementBrief.promptInsert
+        : null,
+    sourceStorageKey:
+      typeof enhancementBrief.sourceStorageKey === "string"
+        ? enhancementBrief.sourceStorageKey
+        : null,
+  };
+}
+
 function mergeMediaQcAnalysis(analysis: Json | null, report: MediaQcReport) {
   const baseAnalysis = isJsonObject(analysis) ? analysis : {};
 
@@ -188,6 +233,68 @@ function mergeMediaQcAnalysis(analysis: Json | null, report: MediaQcReport) {
     ...baseAnalysis,
     mediaQc: report as unknown as Json,
   } satisfies Json;
+}
+
+function mergeEnhancementBriefAnalysis({
+  analysis,
+  promptPath,
+  result,
+}: {
+  analysis: Json | null;
+  promptPath: string;
+  result: ImageEnhancementAnalysisResult;
+}): Json {
+  const baseAnalysis = isJsonObject(analysis) ? analysis : {};
+
+  return {
+    ...baseAnalysis,
+    enhancementBrief: {
+      brief: result.brief as unknown as Json,
+      generatedAt: new Date().toISOString(),
+      model: result.model,
+      promptInsert: result.promptInsert,
+      promptPath,
+      provider: result.provider,
+      sourceStorageKey: result.sourceStorageKey ?? null,
+    },
+  } as Json;
+}
+
+function mergeImageEnhancementAnalysis({
+  analysis,
+  aspectRatio,
+  model,
+  preservationBriefPrompt,
+  provider,
+  providerJobId,
+  sourceMimeType,
+  targetResolution,
+}: {
+  analysis: Json | null;
+  aspectRatio: "16:9";
+  model: string;
+  preservationBriefPrompt: string | null;
+  provider: string;
+  providerJobId: string;
+  sourceMimeType: string;
+  targetResolution: "2K";
+}): Json {
+  const baseAnalysis = isJsonObject(analysis) ? analysis : {};
+  const imageEnhancement = {
+    aspectRatio,
+    model,
+    preservationBriefApplied: Boolean(preservationBriefPrompt),
+    provider,
+    providerJobId,
+    sourceMimeType,
+    targetResolution,
+  };
+
+  return {
+    ...baseAnalysis,
+    ...imageEnhancement,
+    imageEnhancement,
+  } as Json;
 }
 
 function hasSceneChangeAnalysis(report: MediaQcReport) {
@@ -716,14 +823,15 @@ export const projectPipeline = inngest.createFunction(
 
       const upscalingPrompt = await step.run(
         "load-upscaling-prompt",
-        async () =>
-          buildUpscalingPrompt(
-            await loadPipelinePrompt("upscaling"),
-            context.project.special_notes,
-          ),
+        async () => loadPipelinePrompt("upscaling"),
+      );
+      const enhancementAgentPrompt = await step.run(
+        "load-enhancement-agent-prompt",
+        async () => loadPipelinePrompt("enhancement-agent"),
       );
 
       const upscalingPlan = await step.run("prepare-upscaling-plan", () => ({
+        enhancementAgentPromptPath: ENHANCEMENT_AGENT_PROMPT_PATH,
         images: context.images.map((image) => ({
           hasExistingOutput: Boolean(image.upscaled_storage_key),
           imageId: image.id,
@@ -778,6 +886,83 @@ export const projectPipeline = inngest.createFunction(
             const sourceBytes = new Uint8Array(await sourceFile.arrayBuffer());
             const sourceMimeType =
               sourceFile.type || inferImageMimeType(image.original_storage_key);
+            const existingEnhancementBrief =
+              getExistingEnhancementBrief(image.analysis);
+            let analysisForImage: Json | null = image.analysis;
+            let preservationBriefPrompt: string | null = null;
+            let preservationBriefSource: "generated" | "reused" = "generated";
+
+            if (
+              existingEnhancementBrief?.promptInsert &&
+              existingEnhancementBrief.sourceStorageKey ===
+                image.original_storage_key
+            ) {
+              preservationBriefPrompt = existingEnhancementBrief.promptInsert;
+              preservationBriefSource = "reused";
+
+              await writePipelineLog({
+                message: `Image ${image.order_index + 1} reused its enhancement preservation brief.`,
+                metadata: {
+                  imageId: image.id,
+                  promptPath: ENHANCEMENT_AGENT_PROMPT_PATH,
+                  sourceStorageKey: image.original_storage_key,
+                },
+                projectId,
+                status: "skipped",
+                step: "enhancement_analysis",
+              });
+            } else {
+              const analysisResult = await analyzeImageForEnhancement({
+                prompt: enhancementAgentPrompt,
+                sourceImage: sourceBytes,
+                sourceMimeType,
+                sourceStorageKey: image.original_storage_key,
+              });
+
+              preservationBriefPrompt = analysisResult.promptInsert;
+              analysisForImage = mergeEnhancementBriefAnalysis({
+                analysis: image.analysis,
+                promptPath: ENHANCEMENT_AGENT_PROMPT_PATH,
+                result: analysisResult,
+              });
+
+              const { error: analysisUpdateError } = await supabase
+                .from("project_images")
+                .update({
+                  analysis: analysisForImage,
+                })
+                .eq("id", image.id);
+
+              if (analysisUpdateError) {
+                throw analysisUpdateError;
+              }
+
+              await writePipelineLog({
+                message: `Image ${image.order_index + 1} analyzed for enhancement preservation locks.`,
+                metadata: {
+                  confidence: analysisResult.brief.confidence,
+                  colorLockCount: analysisResult.brief.colorLocks.length,
+                  imageId: image.id,
+                  lightOffCount: analysisResult.brief.lighting.off.length,
+                  lightOnCount: analysisResult.brief.lighting.on.length,
+                  materialLockCount: analysisResult.brief.materialLocks.length,
+                  model: analysisResult.model,
+                  promptPath: ENHANCEMENT_AGENT_PROMPT_PATH,
+                  provider: analysisResult.provider,
+                  riskNoteCount: analysisResult.brief.riskNotes.length,
+                  sourceStorageKey: image.original_storage_key,
+                },
+                projectId,
+                status: "completed",
+                step: "enhancement_analysis",
+              });
+            }
+
+            const imageSpecificUpscalingPrompt = buildUpscalingPrompt({
+              markdown: upscalingPrompt,
+              notes: context.project.special_notes,
+              preservationPrompt: preservationBriefPrompt,
+            });
             const plannedOutputStorageKey = buildEnhancedStorageKey(
               image.original_storage_key,
               "image/png",
@@ -795,7 +980,10 @@ export const projectPipeline = inngest.createFunction(
               provider: AI_PROVIDERS.imageEnhancement.primary,
               request: {
                 aspectRatio: "16:9",
+                enhancementAgentPromptPath: ENHANCEMENT_AGENT_PROMPT_PATH,
                 promptPath: UPSCALING_PROMPT_PATH,
+                preservationBriefApplied: Boolean(preservationBriefPrompt),
+                preservationBriefSource,
                 sourceMimeType,
                 sourceStorageKey: image.original_storage_key,
                 targetResolution: "2K",
@@ -898,7 +1086,7 @@ export const projectPipeline = inngest.createFunction(
             try {
               result = await enhanceImageWithNanoBananaPro({
                 aspectRatio: "16:9",
-                prompt: upscalingPrompt,
+                prompt: imageSpecificUpscalingPrompt,
                 sourceImage: sourceBytes,
                 sourceMimeType,
                 sourceStorageKey: image.original_storage_key,
@@ -944,14 +1132,16 @@ export const projectPipeline = inngest.createFunction(
               const { error: updateError } = await supabase
                 .from("project_images")
                 .update({
-                  analysis: {
+                  analysis: mergeImageEnhancementAnalysis({
+                    analysis: analysisForImage,
                     aspectRatio: "16:9",
                     model: result.model,
+                    preservationBriefPrompt,
                     provider: result.provider,
                     providerJobId: providerJob.job.id,
                     sourceMimeType,
                     targetResolution: "2K",
-                  },
+                  }),
                   upscaled_storage_key: outputStorageKey,
                   video_status: "upscaled",
                 })

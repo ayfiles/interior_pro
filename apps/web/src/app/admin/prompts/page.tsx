@@ -96,7 +96,11 @@ export default async function AdminPromptsPage({
             </div>
           </div>
 
-          <form action={publishPromptVersion} className="grid gap-4 p-4">
+          <form
+            action={publishPromptVersion}
+            className="grid gap-4 p-4"
+            key={`${selected.slug}:${selected.latestVersionNumber ?? "file"}:${selected.updatedAt}`}
+          >
             <input name="slug" type="hidden" value={selected.slug} />
             <label className="grid gap-2">
               <span className="text-sm text-[var(--muted)]">Prompt body</span>

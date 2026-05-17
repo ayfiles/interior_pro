@@ -13,6 +13,9 @@ Ultra-realistic 2K 16:9 architectural interior photograph, exact 1:1 geometry ma
 REFERENCE IMAGE IS ABSOLUTE:
 The reference image defines everything. Do not redesign, reinterpret, restyle, simplify, or invent anything. If there is any conflict, the reference image always has priority.
 
+IMAGE-SPECIFIC PRESERVATION BRIEF:
+If an image-specific preservation brief is provided after this master prompt, treat it as a conservative factual checklist extracted from the reference image. Use it to lock concrete colors, light on/off states, visible materials, object states, geometry, and high-risk details for that specific image. The preservation brief does not allow redesign or invention. If the brief and the visible reference image conflict, the reference image has highest priority.
+
 CRITICAL COLOR LOCK:
 Use only the exact colors already present in the reference image. Do not introduce any new colors, tones, hues, tints, changes, or shifts. Preserve the original palette exactly across walls, floors, textiles, furniture, wood, stone, tiles, cabinetry, metal, glass, decor, lights, and reflections.
 

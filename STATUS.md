@@ -1,6 +1,6 @@
 # Interior Pro Status
 
-Stand: 2026-05-14
+Stand: 2026-05-17
 
 ## Kurzfassung
 
@@ -44,6 +44,10 @@ GitHub Repo: `ayfiles/interior_pro`
   - Intake validieren
   - Status `upscaling`
   - Source Image aus Supabase Storage laden
+  - Enhancement-Agent-Prompt aus `enhancement-agent.md` laden
+  - jedes Source Image per Gemini Vision analysieren: Lichtquellen an/aus, konkrete Objektfarben, Materialien, Oberflaechen, Objektzustaende, Geometrie- und Risiko-Locks
+  - strukturierten Preservation Brief in `project_images.analysis.enhancementBrief` speichern
+  - Upscaling-Masterprompt, Preservation Brief und Client Notes zu einem bildspezifischen Nano-Banana-Pro-Prompt zusammenfuehren
   - Provider-Job/Idempotency-Lock fuer Gemini anlegen
   - Nano Banana Pro / Gemini API callen
   - Enhanced Image unter `/enhanced/` speichern
@@ -101,6 +105,7 @@ GitHub Repo: `ayfiles/interior_pro`
   - KIE Callback-Duplikate werden ueber `provider_jobs` idempotent behandelt
   - angefangene Gemini-Jobs ohne Output blockieren automatische Doppelaufrufe und verlangen manuellen Retry
 - Upscaling-Prompt ist versioniert in `apps/web/src/inngest/prompts/upscaling.md`.
+- Enhancement-Agent-Prompt ist versioniert in `apps/web/src/inngest/prompts/enhancement-agent.md`.
 - Video-Agent-Regeln sind versioniert in `apps/web/src/inngest/prompts/agent.md`.
 - Multi-Shot-Prompt ist versioniert in `apps/web/src/inngest/prompts/multi-shot.md`.
 - Supabase RLS ist aktiv.
@@ -205,6 +210,7 @@ Hinweis: Im Storage liegen noch alte Objekte aus frueheren Tests. Cleanup ist no
 - Worker nutzt Service Role nur serverseitig.
 - Secrets liegen lokal in `.env.local` Dateien und werden nicht ins Repo geschrieben.
 - Queue/Orchestration: Inngest.
+- Enhancement Preservation Analysis: Gemini Vision ueber `GEMINI_IMAGE_ANALYSIS_MODEL` (Default `gemini-2.5-pro`) erzeugt pro Source-Bild konservative Preservation Briefs.
 - Image Enhancement: Nano Banana Pro via Gemini REST API (`gemini-3-pro-image-preview`).
 - Upscaling Output: 2K, 16:9.
 - Ziel fuer Image-to-Video: Kling 3.0 Pro ueber KIE.AI; erster echter Single-Shot-Test ist erfolgreich.

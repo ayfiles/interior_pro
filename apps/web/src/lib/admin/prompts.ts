@@ -37,6 +37,13 @@ const SEEDED_PROMPTS = [
   },
   {
     description:
+      "Analyzes source images and creates image-specific preservation briefs before enhancement.",
+    filePath: "src/inngest/prompts/enhancement-agent.md",
+    slug: "enhancement-agent",
+    title: "Enhancement Agent",
+  },
+  {
+    description:
       "Primary Kling prompt for wider room perspectives and multi-shot motion.",
     filePath: "src/inngest/prompts/multi-shot.md",
     slug: "multi-shot",
@@ -83,6 +90,25 @@ function fallbackPromptForSlug(slug: string): SeededPrompt | undefined {
   return SEEDED_PROMPTS.find((prompt) => prompt.slug === slug);
 }
 
+async function syncSeededPromptDocuments() {
+  const admin = createAdminClient();
+  const { error } = await admin.from("admin_prompt_documents").upsert(
+    SEEDED_PROMPTS.map((prompt) => ({
+      description: prompt.description,
+      file_path: prompt.filePath,
+      slug: prompt.slug,
+      title: prompt.title,
+    })),
+    {
+      onConflict: "slug",
+    },
+  );
+
+  if (error) {
+    throw error;
+  }
+}
+
 export async function loadPipelinePrompt(slug: string) {
   const fallback = fallbackPromptForSlug(slug);
   const admin = createAdminClient();
@@ -118,6 +144,8 @@ export async function loadPipelinePrompt(slug: string) {
 }
 
 export async function listAdminPromptDocuments() {
+  await syncSeededPromptDocuments();
+
   const admin = createAdminClient();
   const { data: documents, error: documentsError } = await admin
     .from("admin_prompt_documents")
@@ -191,6 +219,8 @@ export async function publishAdminPromptVersion({
   }
 
   const admin = createAdminClient();
+  await syncSeededPromptDocuments();
+
   const { data: document, error: documentError } = await admin
     .from("admin_prompt_documents")
     .select("id, title")
