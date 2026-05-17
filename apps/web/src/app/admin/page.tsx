@@ -125,7 +125,7 @@ export default async function AdminOverviewPage() {
               attentionProjects.map((project) => (
                 <Link
                   className="rounded-md border border-white/10 bg-white/[0.03] p-3 transition hover:border-[var(--brass)]/45 hover:bg-white/[0.06]"
-                  href={`/admin/projects#${project.id}`}
+                  href={`/admin/projects/${project.id}`}
                   key={project.id}
                 >
                   <div className="flex items-start justify-between gap-3">

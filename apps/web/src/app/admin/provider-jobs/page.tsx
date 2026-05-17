@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { updateAdminProviderJobStatus } from "@/app/admin/actions";
 import {
   EmptyState,
   StatusBadge,
@@ -46,6 +47,7 @@ export default async function AdminProviderJobsPage() {
                   <th className="px-4 py-3 font-medium">Credits</th>
                   <th className="px-4 py-3 font-medium">Cost</th>
                   <th className="px-4 py-3 font-medium">Updated</th>
+                  <th className="px-4 py-3 font-medium">Action</th>
                 </tr>
               </thead>
               <tbody>
@@ -69,7 +71,7 @@ export default async function AdminProviderJobsPage() {
                     <td className="px-4 py-3">
                       <Link
                         className="font-medium hover:text-[var(--brass)]"
-                        href={`/projects/${job.projectId}`}
+                        href={`/admin/projects/${job.projectId}`}
                       >
                         {job.projectName}
                       </Link>
@@ -95,6 +97,39 @@ export default async function AdminProviderJobsPage() {
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">
                       {formatDateTime(job.updatedAt)}
+                    </td>
+                    <td className="px-4 py-3">
+                      <form action={updateAdminProviderJobStatus} className="flex gap-2">
+                        <input name="providerJobId" type="hidden" value={job.id} />
+                        <input
+                          name="redirectTo"
+                          type="hidden"
+                          value="/admin/provider-jobs"
+                        />
+                        <select
+                          className="h-9 rounded-md border border-[var(--line)] bg-black/35 px-2 text-xs outline-none focus:border-[var(--brass)]"
+                          defaultValue={job.status}
+                          name="status"
+                        >
+                          {[
+                            "processing",
+                            "completed",
+                            "failed",
+                            "requires_manual_retry",
+                            "canceled",
+                          ].map((status) => (
+                            <option key={status} value={status}>
+                              {statusLabel(status)}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="h-9 rounded-md border border-[var(--line)] px-2 text-xs text-[var(--muted)] hover:bg-white/[0.06] hover:text-[var(--foreground)]"
+                          type="submit"
+                        >
+                          Save
+                        </button>
+                      </form>
                     </td>
                   </tr>
                 ))}

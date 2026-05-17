@@ -3,8 +3,12 @@ import {
   EmptyState,
   StatusBadge,
   formatDateTime,
+  statusLabel,
 } from "@/components/admin-ui";
-import { resumeAdminProjectPipeline } from "@/app/admin/actions";
+import {
+  resumeAdminProjectPipeline,
+  setAdminProjectStatus,
+} from "@/app/admin/actions";
 import { requirePlatformAdmin } from "@/lib/admin/auth";
 import { listAdminTestingProjects } from "@/lib/admin/data";
 
@@ -49,7 +53,8 @@ export default async function AdminTestingPage({
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">Images</th>
                   <th className="px-4 py-3 font-medium">Created</th>
-                  <th className="px-4 py-3 font-medium">Action</th>
+                  <th className="px-4 py-3 font-medium">Set Step</th>
+                  <th className="px-4 py-3 font-medium">Queue</th>
                 </tr>
               </thead>
               <tbody>
@@ -69,6 +74,45 @@ export default async function AdminTestingPage({
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">
                       {formatDateTime(project.createdAt)}
+                    </td>
+                    <td className="px-4 py-3">
+                      <form action={setAdminProjectStatus} className="flex gap-2">
+                        <input name="projectId" type="hidden" value={project.id} />
+                        <input
+                          name="redirectTo"
+                          type="hidden"
+                          value="/admin/testing"
+                        />
+                        <select
+                          className="h-9 rounded-md border border-[var(--line)] bg-black/35 px-2 text-xs outline-none focus:border-[var(--brass)]"
+                          defaultValue={project.status}
+                          name="status"
+                        >
+                          {[
+                            "submitted",
+                            "queued",
+                            "validating",
+                            "upscaling",
+                            "generating_video",
+                            "media_qc",
+                            "editing",
+                            "rendering",
+                            "quality_check",
+                            "failed",
+                            "canceled",
+                          ].map((status) => (
+                            <option key={status} value={status}>
+                              {statusLabel(status)}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="h-9 rounded-md border border-[var(--line)] px-2 text-xs text-[var(--muted)] hover:bg-white/[0.06] hover:text-[var(--foreground)]"
+                          type="submit"
+                        >
+                          Set
+                        </button>
+                      </form>
                     </td>
                     <td className="px-4 py-3">
                       <form action={resumeAdminProjectPipeline}>

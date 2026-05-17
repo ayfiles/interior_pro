@@ -68,6 +68,13 @@ grant select, insert, update, delete on table public.platform_admins to service_
 grant select, insert, update, delete on table public.admin_audit_logs to service_role;
 grant select, insert, update, delete on table public.admin_prompt_documents to service_role;
 grant select, insert, update, delete on table public.admin_prompt_versions to service_role;
+grant select, insert, update, delete on table public.music_tracks to service_role;
+grant select, insert, update, delete on table public.video_credit_ledger to service_role;
+grant select, insert, update, delete on table public.credit_reservations to service_role;
+grant select, insert, update, delete on table public.projects to service_role;
+grant select, insert, update, delete on table public.project_images to service_role;
+grant select, insert, update, delete on table public.project_outputs to service_role;
+grant select, insert, update, delete on table public.pipeline_logs to service_role;
 
 insert into public.admin_prompt_documents (slug, title, description, file_path)
 values

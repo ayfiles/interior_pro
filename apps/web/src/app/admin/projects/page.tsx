@@ -46,7 +46,7 @@ export default async function AdminProjectsPage() {
                     <td className="px-4 py-3">
                       <Link
                         className="font-medium text-[var(--foreground)] hover:text-[var(--brass)]"
-                        href={`/projects/${project.id}`}
+                        href={`/admin/projects/${project.id}`}
                       >
                         {project.customerName}
                       </Link>

@@ -289,8 +289,15 @@ interface Database {
         Relationships: [];
       };
       music_tracks: {
-        Insert: never;
+        Insert: {
+          duration_seconds: number;
+          file_storage_key: string;
+          genre?: string | null;
+          is_active?: boolean;
+          name: string;
+        };
         Row: {
+          created_at: string;
           duration_seconds: number;
           file_storage_key: string;
           genre: string | null;
@@ -298,7 +305,13 @@ interface Database {
           is_active: boolean;
           name: string;
         };
-        Update: never;
+        Update: {
+          duration_seconds?: number;
+          file_storage_key?: string;
+          genre?: string | null;
+          is_active?: boolean;
+          name?: string;
+        };
         Relationships: [];
       };
       provider_jobs: {
@@ -396,6 +409,7 @@ interface Database {
           voiceover_script?: string | null;
         };
         Row: {
+          created_at: string;
           duration_seconds: number | null;
           file_size_bytes: number | null;
           id: string;
@@ -432,6 +446,7 @@ interface Database {
         Update: {
           completed_at?: string | null;
           error_message?: string | null;
+          music_id?: string | null;
           status?: string;
           updated_at?: string;
         };
