@@ -12,6 +12,15 @@ export function formatDateTime(value: string | null | undefined) {
 }
 
 export function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    enhancement_agent: "Enhancement + Image Upscaler",
+    image_upscaler: "Enhancement + Image Upscaler",
+  };
+
+  if (labels[status]) {
+    return labels[status];
+  }
+
   return status
     .split(/[_.]/)
     .map((part) => part[0].toUpperCase() + part.slice(1))
@@ -19,7 +28,12 @@ export function statusLabel(status: string) {
 }
 
 export function StatusBadge({ status }: { status: string }) {
-  const tone = ["failed", "requires_manual_retry", "canceled"].includes(status)
+  const tone = [
+    "failed",
+    "requires_manual_retry",
+    "canceled",
+    "stale",
+  ].includes(status)
     ? "border-[#ff9aaa]/30 bg-[#782f3d]/35 text-[#ffd7dd]"
     : ["completed", "active", "published"].includes(status)
       ? "border-[#80d9b7]/25 bg-[#153f36]/70 text-[#bde5d9]"
@@ -47,7 +61,9 @@ export function MetricCard({
     <section className="rounded-lg border border-[var(--line)] bg-[rgba(20,17,14,0.86)] p-4">
       <p className="text-sm text-[var(--muted)]">{label}</p>
       <div className="mt-2 text-3xl font-semibold">{value}</div>
-      {detail ? <p className="mt-2 text-sm text-[var(--muted)]">{detail}</p> : null}
+      {detail ? (
+        <p className="mt-2 text-sm text-[var(--muted)]">{detail}</p>
+      ) : null}
     </section>
   );
 }

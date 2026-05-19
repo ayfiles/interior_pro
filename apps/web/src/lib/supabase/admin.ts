@@ -293,8 +293,10 @@ interface Database {
           duration_seconds: number;
           file_storage_key: string;
           genre?: string | null;
+          instructions_md?: string | null;
           is_active?: boolean;
           name: string;
+          plan_json?: Json | null;
         };
         Row: {
           created_at: string;
@@ -302,15 +304,19 @@ interface Database {
           file_storage_key: string;
           genre: string | null;
           id: string;
+          instructions_md: string | null;
           is_active: boolean;
           name: string;
+          plan_json: Json | null;
         };
         Update: {
           duration_seconds?: number;
           file_storage_key?: string;
           genre?: string | null;
+          instructions_md?: string | null;
           is_active?: boolean;
           name?: string;
+          plan_json?: Json | null;
         };
         Relationships: [];
       };
@@ -391,6 +397,7 @@ interface Database {
         };
         Update: {
           analysis?: Json | null;
+          prompt_type?: string | null;
           upscaled_storage_key?: string | null;
           video_storage_key?: string | null;
           video_status?: string;
@@ -419,6 +426,139 @@ interface Database {
           thumbnail_storage_key: string | null;
           video_storage_key: string;
           voiceover_script: string | null;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      testing_runs: {
+        Insert: {
+          actual_cost_usd?: number;
+          completed_at?: string | null;
+          config?: Json;
+          error_message?: string | null;
+          estimated_cost_usd?: number;
+          id?: string;
+          input_summary?: Json;
+          name: string;
+          organization_id?: string | null;
+          provider_credits?: number;
+          queued_at?: string | null;
+          related_project_id?: string | null;
+          requested_by?: string | null;
+          run_mode?: string;
+          started_at?: string | null;
+          status?: string;
+          target_step: string;
+        };
+        Row: {
+          actual_cost_usd: number;
+          completed_at: string | null;
+          config: Json;
+          created_at: string;
+          error_message: string | null;
+          estimated_cost_usd: number;
+          id: string;
+          input_summary: Json;
+          name: string;
+          organization_id: string | null;
+          provider_credits: number;
+          queued_at: string | null;
+          related_project_id: string | null;
+          requested_by: string | null;
+          run_mode: string;
+          started_at: string | null;
+          status: string;
+          target_step: string;
+          updated_at: string;
+        };
+        Update: {
+          actual_cost_usd?: number;
+          completed_at?: string | null;
+          config?: Json;
+          error_message?: string | null;
+          estimated_cost_usd?: number;
+          input_summary?: Json;
+          organization_id?: string | null;
+          provider_credits?: number;
+          queued_at?: string | null;
+          related_project_id?: string | null;
+          requested_by?: string | null;
+          run_mode?: string;
+          started_at?: string | null;
+          status?: string;
+          target_step?: string;
+          updated_at?: string;
+        };
+        Relationships: [];
+      };
+      testing_run_assets: {
+        Insert: {
+          bucket: string;
+          content_type?: string | null;
+          file_name?: string | null;
+          file_size_bytes?: number | null;
+          kind: string;
+          metadata?: Json;
+          run_id: string;
+          storage_key: string;
+        };
+        Row: {
+          bucket: string;
+          content_type: string | null;
+          created_at: string;
+          file_name: string | null;
+          file_size_bytes: number | null;
+          id: string;
+          kind: string;
+          metadata: Json;
+          run_id: string;
+          storage_key: string;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      testing_run_logs: {
+        Insert: {
+          message?: string | null;
+          metadata?: Json;
+          run_id: string;
+          status: string;
+          step: string;
+        };
+        Row: {
+          created_at: string;
+          id: string;
+          message: string | null;
+          metadata: Json;
+          run_id: string;
+          status: string;
+          step: string;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      testing_run_outputs: {
+        Insert: {
+          bucket?: string | null;
+          content_type?: string | null;
+          file_size_bytes?: number | null;
+          kind: string;
+          label: string;
+          metadata?: Json;
+          run_id: string;
+          storage_key?: string | null;
+        };
+        Row: {
+          bucket: string | null;
+          content_type: string | null;
+          created_at: string;
+          file_size_bytes: number | null;
+          id: string;
+          kind: string;
+          label: string;
+          metadata: Json;
+          run_id: string;
+          storage_key: string | null;
         };
         Update: never;
         Relationships: [];

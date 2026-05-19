@@ -5,6 +5,7 @@
   "packageManager": "pnpm@10.12.1",
   "scripts": {
     "dev": "turbo dev",
+    "dev:inngest": "pnpm dlx inngest-cli@latest dev -u http://localhost:3000/api/inngest",
     "dev:web": "pnpm --filter @interior-pro/web dev",
     "build": "turbo build",
     "lint": "turbo lint",

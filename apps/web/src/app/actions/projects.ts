@@ -17,6 +17,7 @@ export interface CreateProjectInput {
   customerName: string;
   imageStorageKeys: string[];
   musicGenre: string;
+  musicId?: string | null;
   projectId: string;
   specialNotes: string | null;
   voiceSelection: string;
@@ -61,11 +62,16 @@ export async function createProjectFromUploadedAssets(
   const { organization, supabase, user } = await getRequiredWorkspace();
   const customerName = cleanText(input.customerName);
   const musicGenre = cleanText(input.musicGenre, "cinematic_ambient");
+  const musicId = input.musicId?.trim() || null;
   const voiceSelection = cleanText(input.voiceSelection, "speaker_amelie");
   const specialNotes = input.specialNotes?.trim() || null;
 
   if (!UUID_PATTERN.test(input.projectId)) {
     return { error: "Invalid project id.", ok: false };
+  }
+
+  if (musicId && !UUID_PATTERN.test(musicId)) {
+    return { error: "Invalid music track id.", ok: false };
   }
 
   if (!customerName) {
@@ -96,6 +102,7 @@ export async function createProjectFromUploadedAssets(
     customer_name: customerName,
     id: input.projectId,
     music_genre: musicGenre,
+    music_id: musicId,
     organization_id: organization.id,
     special_notes: specialNotes,
     status: "submitted",
@@ -111,7 +118,6 @@ export async function createProjectFromUploadedAssets(
       order_index: index,
       original_storage_key: storageKey,
       project_id: input.projectId,
-      prompt_type: "multi_shot",
     })),
   );
 

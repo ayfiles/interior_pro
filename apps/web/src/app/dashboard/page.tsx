@@ -1,3 +1,5 @@
+import { calculateAvailableCredits } from "@interior-pro/billing";
+import type { CreditReservationStatus } from "@interior-pro/shared";
 import {
   DashboardShell,
   type DashboardCreditSummary,
@@ -6,7 +8,7 @@ import {
 import { getSupabasePublicConfig } from "@/lib/env";
 import { getRequiredWorkspace } from "@/lib/workspace";
 
-const PILOT_CREDITS = 5;
+const DEFAULT_PILOT_CREDITS = 5;
 
 interface ProjectRow {
   created_at: string;
@@ -27,11 +29,14 @@ interface CreditReservationRow {
   status: string;
 }
 
-function isActiveReservation(reservation: CreditReservationRow) {
-  return (
-    reservation.status === "reserved" &&
-    new Date(reservation.expires_at).getTime() > Date.now()
-  );
+interface CreditLedgerRow {
+  amount: number;
+}
+
+function toCreditReservationStatus(status: string): CreditReservationStatus {
+  return ["reserved", "consumed", "released", "expired"].includes(status)
+    ? (status as CreditReservationStatus)
+    : "expired";
 }
 
 export default async function DashboardPage() {
@@ -64,6 +69,11 @@ export default async function DashboardPage() {
     .select("project_id, amount, status, expires_at")
     .eq("organization_id", organization.id);
 
+  const { data: ledgerEntries } = await supabase
+    .from("video_credit_ledger")
+    .select("amount")
+    .eq("organization_id", organization.id);
+
   const imageCounts = ((imageRows ?? []) as ProjectImageCountRow[]).reduce<
     Record<string, number>
   >((counts, image) => {
@@ -71,13 +81,32 @@ export default async function DashboardPage() {
     return counts;
   }, {});
 
-  const reserved = ((reservations ?? []) as CreditReservationRow[])
-    .filter(isActiveReservation)
-    .reduce((sum, reservation) => sum + reservation.amount, 0);
+  const ledger = (ledgerEntries ?? []) as CreditLedgerRow[];
+  const effectiveLedger = ledger.length
+    ? ledger
+    : [{ amount: DEFAULT_PILOT_CREDITS }];
+  const reservationRows = (reservations ?? []) as CreditReservationRow[];
+  const included = effectiveLedger.reduce((sum, entry) => sum + entry.amount, 0);
+  const reserved = reservationRows.reduce((sum, reservation) => {
+    const expiresAt = new Date(reservation.expires_at);
+
+    if (reservation.status !== "reserved" || expiresAt <= new Date()) {
+      return sum;
+    }
+
+    return sum + reservation.amount;
+  }, 0);
 
   const creditSummary: DashboardCreditSummary = {
-    available: Math.max(PILOT_CREDITS - reserved, 0),
-    included: PILOT_CREDITS,
+    available: calculateAvailableCredits(
+      effectiveLedger,
+      reservationRows.map((reservation) => ({
+        amount: reservation.amount,
+        expiresAt: reservation.expires_at,
+        status: toCreditReservationStatus(reservation.status),
+      })),
+    ),
+    included,
     reserved,
   };
 

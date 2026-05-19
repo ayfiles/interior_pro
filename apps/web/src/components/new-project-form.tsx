@@ -86,6 +86,12 @@ interface ToastState {
 
 interface NewProjectFormProps {
   imageRequirements: VideoImageRequirements;
+  musicTracks: Array<{
+    durationSeconds: number;
+    genre: string | null;
+    id: string;
+    name: string;
+  }>;
   organizationId: string;
 }
 
@@ -125,6 +131,7 @@ function ToastIcon({ kind }: { kind: ToastKind }) {
 
 export function NewProjectForm({
   imageRequirements,
+  musicTracks,
   organizationId,
 }: NewProjectFormProps) {
   const router = useRouter();
@@ -205,6 +212,10 @@ export function NewProjectForm({
     const customerName = String(formData.get("customerName") ?? "").trim();
     const voiceSelection = String(formData.get("voiceSelection") ?? "").trim();
     const musicGenre = String(formData.get("musicGenre") ?? "").trim();
+    const musicId = String(formData.get("musicId") ?? "").trim();
+    const selectedTrack = musicTracks.find((track) => track.id === musicId);
+    const selectedMusicGenre =
+      selectedTrack?.genre ?? (musicGenre || "cinematic_ambient");
     const specialNotes = String(formData.get("specialNotes") ?? "").trim();
     const images = selectedFiles.filter((file) => file.size > 0);
     const validationError = validateImages(images);
@@ -218,6 +229,15 @@ export function NewProjectForm({
         kind: "error",
         message: "Add a customer or collection name before uploading.",
         title: "Missing project name",
+      });
+      return;
+    }
+
+    if (musicId && !selectedTrack) {
+      showToast({
+        kind: "error",
+        message: "Choose an active music track from the list.",
+        title: "Music track unavailable",
       });
       return;
     }
@@ -261,7 +281,8 @@ export function NewProjectForm({
         customer_name: customerName,
         id: projectId,
         organization_id: organizationId,
-        music_genre: musicGenre || "cinematic_ambient",
+        music_genre: selectedMusicGenre,
+        music_id: musicId || null,
         special_notes: specialNotes || null,
         status: "draft",
         voice_selection: voiceSelection || "speaker_amelie",
@@ -303,7 +324,6 @@ export function NewProjectForm({
             order_index: index,
             original_storage_key: storageKey,
             project_id: projectId,
-            prompt_type: "multi_shot",
           });
 
         if (imageError) {
@@ -338,7 +358,8 @@ export function NewProjectForm({
         metadata: {
           imageEnhancement: "nano-banana-pro",
           imageToVideo: "kling-3.0",
-          musicGenre: musicGenre || "cinematic_ambient",
+          musicGenre: selectedMusicGenre,
+          musicId: musicId || null,
           voiceSelection: voiceSelection || "speaker_amelie",
         },
         project_id: projectId,
@@ -484,6 +505,24 @@ export function NewProjectForm({
             </select>
           </label>
         </div>
+
+        <label className="block">
+          <span className="text-sm text-[var(--muted)]">Music track</span>
+          <select
+            className="mt-2 h-12 w-full rounded-md border border-[var(--line)] bg-black/25 px-3 text-sm text-[var(--foreground)] outline-none transition focus:border-[var(--brass)]"
+            defaultValue=""
+            disabled={isSubmitting}
+            name="musicId"
+          >
+            <option value="">Auto-select latest active track for type</option>
+            {musicTracks.map((track) => (
+              <option key={track.id} value={track.id}>
+                {track.name} - {track.genre ?? "no genre"} -{" "}
+                {Math.round(track.durationSeconds)}s
+              </option>
+            ))}
+          </select>
+        </label>
 
         <label className="block">
           <span className="text-sm text-[var(--muted)]">Source images</span>

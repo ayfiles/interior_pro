@@ -55,15 +55,17 @@ GitHub Repo: `ayfiles/interior_pro`
   - `project_images.upscaled_storage_key` setzen
   - `project_images.video_status` auf `upscaled` setzen
   - Status `generating_video`
-  - fuer den Kling-Step eine signed URL fuer das Enhanced Image erzeugen
-  - Single-Shot-Prompt aus `single-shot.md` laden
+  - Video Agent analysiert alle Enhanced Images und schreibt `single_shot` / `multi_shot` nach `project_images.prompt_type`
+  - fuer jeden Kling-Clip eine signed URL fuer das jeweilige Enhanced Image erzeugen
+  - Single-Shot-Prompt aus `single-shot.md` und Multi-Shot-Prompt aus `multi-shot.md` laden
   - Provider-Job/Idempotency-Lock fuer KIE/Kling anlegen
-  - genau 1 KIE.AI Kling 3.0 Pro Task starten (`duration: "4"`, `mode: "pro"`, `aspect_ratio: "16:9"`, `sound: false`, `multi_shots: false`)
+  - fuer jedes Enhanced Image einen KIE.AI Kling 3.0 Pro Task starten (`duration: "4"`, `mode: "pro"`, `aspect_ratio: "16:9"`, `sound: false`, `multi_shots` je nach Video-Agent-Entscheidung)
   - KIE Task-ID in `provider_jobs.external_task_id` speichern
   - lokal ohne Public Callback URL: KIE Task pollen
   - Produktion mit `KIE_CALLBACK_URL` oder `NEXT_PUBLIC_APP_URL`: auf KIE Callback warten
   - KIE Callback unter `/api/kie/callback` annehmen
   - Callback schnell bestaetigen und internen Inngest Job `kie-callback-processor` starten
+  - bei mehreren Clips wartet der Callback-Prozessor, bis alle Kling-Clips gespeichert sind, bevor Media QC fortsetzt
   - echtes MP4 in `project-generated-clips` speichern
   - KIE Provider-Metadaten, Credits und Output-Infos in `provider_jobs` speichern
   - `project_images.video_storage_key` setzen
@@ -120,6 +122,8 @@ GitHub Repo: `ayfiles/interior_pro`
 - Dashboard zeigt Credit-Verbrauch.
 - Aktuell sind es noch Pilot-Credits.
 - Provider-Credits/Metadaten werden fuer KIE in `provider_jobs` gespeichert, soweit der Provider sie liefert.
+- `estimated_cost_usd` wird fuer KIE aus `KIE_CREDIT_UNIT_COST_USD` berechnet, wenn die Env-Rate gesetzt ist.
+- Gemini-Enhancement kann ueber `GEMINI_IMAGE_ENHANCEMENT_ESTIMATED_COST_USD` als fixe Schaetzung in `provider_jobs` sichtbar gemacht werden.
 - Reservation wird nach bestandenem finalem Render-QC auf `consumed` gesetzt.
 - Es gibt noch keine echte Preis-/Kostenlogik pro Provider-Step.
 
@@ -127,9 +131,9 @@ GitHub Repo: `ayfiles/interior_pro`
 
 - `draft`, `submitted`, `queued`, `validating`, `upscaling`, `generating_video`, `media_qc`, `editing`, `rendering`, `quality_check`, `completed` und `failed` werden im aktiven Flow genutzt.
 - Nach erfolgreichem Upscaling setzt die Pipeline das Projekt automatisch auf `generating_video`.
-- Der Kling-Single-Shot-Step setzt das Projekt nach dem MP4-Clip automatisch auf `media_qc`.
+- Der Kling-Step setzt das Projekt nach allen MP4-Clips automatisch auf `media_qc`.
 - Nach bestandenem Media QC erzeugt die Pipeline Editor-/Voiceover-/Musik-/Render-Artefakte und rendert ein finales Remotion-MP4.
-- Multi-Shot-Erzeugung und Runway-Fallback fehlen noch.
+- Runway-Fallback fehlt noch.
 - Der KIE Callback-Prozessor setzt Projekte nach gespeichertem Clip auf `media_qc` und feuert ein Resume-Event fuer die Hauptpipeline.
 
 ### Storage
@@ -146,12 +150,14 @@ GitHub Repo: `ayfiles/interior_pro`
 - Dashboard, New Project und Project Detail sind nutzbar.
 - Projekt-Detailseite zeigt generierte Clips als abspielbare Video-Vorschau.
 - Projekt-Detailseite zeigt das finale Video, sobald ein `project_outputs`-Datensatz existiert.
+- Admin-Projektliste zeigt Provider-Jobs, Issues, Credits und geschaetzte Provider-Kosten pro Projekt.
+- Admin-Projektdetail zeigt Provider-Kosten, Clip-Health, Provider-Health, Output-Health, letzten Fehler, Operations-Timeline, Provider-Job-Details und Pipeline-Log-Metadata.
 - Projektseite zeigt noch keine Live-Updates; man muss neu laden.
 - Andere Bereiche wie Billing, Music und Brand Kits sind noch Platzhalter oder nicht gebaut.
 
 ## Was noch nicht geht
 
-- Kein Multi-Shot-Kling-Flow.
+- Multi-Image-Kling-Flow ist aktiviert; Feintuning der Multi-Shot-Auswahl und Provider-Kostenkontrolle ist noch offen.
 - KIE Callback-Endpoint ist gebaut; lokal wird ohne Public Callback URL weiterhin gepollt.
 - Kein Runway-Fallback.
 - Media-QC ist als erster technischer Step vorhanden; noch offen sind feinere Schwellenwerte, UI-Report, visuelle Review und automatische Clip-Regeneration.
@@ -232,14 +238,14 @@ Hinweis: Im Storage liegen noch alte Objekte aus frueheren Tests. Cleanup ist no
    - Provider-Jobs/Task-IDs intern sichtbar machen.
    - Live-Polling oder Realtime fuer Status/Logs.
 2. Retry-Flow bewusst bauen:
-   - fehlgeschlagene `provider_jobs` manuell resetten oder erneut freigeben.
-   - UI-Button fuer sicheren Retry pro Step.
-   - klare Warnung, wenn ein Retry erneut Geld kosten kann.
+   - fehlgeschlagene `provider_jobs` koennen im Admin Panel sicher zurueckgesetzt und erneut gequeued werden.
+   - stale laufende Provider-Jobs koennen ab 30 Minuten ohne Fortschritt als `requires_manual_retry` markiert werden.
+   - offen: feinere Step-spezifische Retry-Assistenten und bessere Kostenwarnungen.
 3. Kosten/Provider-Metadaten pro Pipeline-Step weiter ausbauen, z.B. geschaetzte Gemini-Kosten, Dauer und finale interne Marge.
 4. Kling-Flow ausbauen:
-   - bestehende `provider_jobs` Felder fuer Multi-Shot/mehrere Clips nutzen.
-   - Multi-Shot Prompt aus `multi-shot.md` in den echten KIE-Flow einhaengen.
-   - Agent-Entscheidung aus `agent.md` spaeter wieder fuer Multi-Shot/Camera-Planning verwenden.
+   - Multi-Image-Clip-Erzeugung unter Last mit echten Pilotprojekten validieren.
+   - Multi-Shot Prompt aus `multi-shot.md` weiter mit realen Outputs feintunen.
+   - Agent-Entscheidung aus `agent.md` fuer Camera-Planning und Shot-Auswahl verbessern.
 5. Cleanup fuer orphaned Storage Assets bauen.
 6. Musik- und Voiceover-Integration produktionsnah machen:
    - `music_tracks` befuellen.

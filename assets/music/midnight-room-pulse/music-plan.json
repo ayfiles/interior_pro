@@ -1,0 +1,81 @@
+{
+  "trackName": "Midnight Room Pulse",
+  "slug": "midnight-room-pulse",
+  "status": "first-library-vision",
+  "audioFile": "./midnight-room-pulse_60s.mp3",
+  "sourceFile": "/Users/aytouchlee/Downloads/WhatsApp Audio 2026-05-18 at 17.03.42.mpeg",
+  "sourceMetadata": {
+    "title": "Test 2",
+    "artist": "harunkatran",
+    "comment": "made with suno; created=2026-05-12T20:29:07.881Z; id=7d11664e-f716-4d7f-a3ba-c4b575db0f52"
+  },
+  "adminImport": {
+    "name": "Midnight Room Pulse",
+    "genre": "soft_electronic",
+    "durationSeconds": 60
+  },
+  "trackDurationSeconds": 60,
+  "exportedDurationSeconds": 60.024,
+  "usableStartSeconds": 0,
+  "sourceWindowSeconds": {
+    "start": 0,
+    "end": 60
+  },
+  "fadeSeconds": {
+    "in": {
+      "start": 0,
+      "duration": 1.25
+    },
+    "out": {
+      "start": 57,
+      "duration": 3
+    }
+  },
+  "bpmEstimate": 109.9,
+  "cutPointsSeconds": [
+    0,
+    4.74,
+    9.94,
+    14.65,
+    19.34,
+    24.8,
+    30.16,
+    34.99,
+    40.22,
+    45,
+    50.67
+  ],
+  "secondaryAccentPointsSeconds": [
+    2.65,
+    23.29,
+    27.72,
+    31.88,
+    36.06,
+    41.26,
+    43.86,
+    46.21,
+    49.34,
+    54.82
+  ],
+  "minHardCutSpacingSeconds": 4.5,
+  "preferredHardCutSpacingSeconds": [
+    5,
+    6
+  ],
+  "doNotHardCutAfterSeconds": 50.67,
+  "rules": {
+    "minHardCutSpacingSeconds": 4.5,
+    "preferredHardCutSpacingSeconds": [
+      5,
+      6
+    ],
+    "doNotHardCutAfterSeconds": 50.67,
+    "hardCutsOnlyOnPrimaryCutPoints": true,
+    "secondaryPointsAreAccentsOnly": true
+  },
+  "shortVideoFallback": {
+    "durationSeconds": 54,
+    "fadeOutStartSeconds": 51.5,
+    "useCutPointsThroughSeconds": 50.67
+  }
+}

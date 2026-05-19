@@ -9,6 +9,7 @@ import {
 } from "@/inngest/client";
 import { extractKieResultUrls } from "@/inngest/kie-callback";
 import {
+  estimateKieCostUsd,
   getErrorMessage,
   getProviderJobById,
   updateProviderJob,
@@ -334,22 +335,10 @@ export const kieCallbackProcessor = inngest.createFunction(
           throw imageError;
         }
 
-        const { error: projectError } = await supabase
-          .from("projects")
-          .update({
-            error_message: null,
-            status: "media_qc",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", context.providerJob.project_id);
-
-        if (projectError) {
-          throw projectError;
-        }
-
         await updateProviderJob(context.providerJob.id, {
           completed_at: new Date().toISOString(),
           credits_consumed: taskRecord.creditsConsumed ?? null,
+          estimated_cost_usd: estimateKieCostUsd(taskRecord.creditsConsumed),
           file_size_bytes: clipBytes.byteLength,
           output_storage_key: clipStorageKey,
           response: {
@@ -405,10 +394,156 @@ export const kieCallbackProcessor = inngest.createFunction(
       }
     });
 
+    const clipReadiness = await step.run("check-kie-clip-readiness", async () => {
+      const supabase = createAdminClient();
+      const { data: expectedJobs, error: expectedJobsError } = await supabase
+        .from("provider_jobs")
+        .select("project_image_id")
+        .eq("project_id", context.providerJob.project_id)
+        .eq("step", "video_generation")
+        .not("project_image_id", "is", null);
+
+      if (expectedJobsError) {
+        throw expectedJobsError;
+      }
+
+      const expectedImageIds = Array.from(
+        new Set(
+          (expectedJobs ?? [])
+            .map((job) => job.project_image_id)
+            .filter((imageId): imageId is string => Boolean(imageId)),
+        ),
+      );
+      const fallbackImageIds = context.providerJob.project_image_id
+        ? [context.providerJob.project_image_id]
+        : [];
+      const expectedClipImageIds = expectedImageIds.length
+        ? expectedImageIds
+        : fallbackImageIds;
+
+      const { data: images, error: imagesError } = expectedClipImageIds.length
+        ? await supabase
+            .from("project_images")
+            .select("id, video_storage_key, video_status")
+            .in("id", expectedClipImageIds)
+        : { data: [], error: null };
+
+      if (imagesError) {
+        throw imagesError;
+      }
+
+      const imageRows = (images ?? []) as Array<{
+        id: string;
+        video_storage_key: string | null;
+        video_status: string;
+      }>;
+      const readyImages = imageRows.filter(
+        (image) =>
+          Boolean(image.video_storage_key) &&
+          ["clip_generated", "qc_passed"].includes(image.video_status) &&
+          !image.video_storage_key?.endsWith(".json"),
+      );
+      const pendingImages = imageRows.filter(
+        (image) => !readyImages.some((readyImage) => readyImage.id === image.id),
+      );
+
+      if (pendingImages.length > 0) {
+        await writePipelineLog({
+          message: `KIE callback stored clip ${context.image.order_index + 1}; waiting for ${pendingImages.length} remaining clip${pendingImages.length === 1 ? "" : "s"}.`,
+          metadata: {
+            pendingImageIds: pendingImages.map((image) => image.id),
+            readyClipCount: readyImages.length,
+            totalClipCount: imageRows.length,
+          },
+          projectId: context.providerJob.project_id,
+          status: "started",
+          step: "video_generation",
+        });
+
+        return {
+          ready: false,
+          readyClipCount: readyImages.length,
+          shouldResumePipeline: false,
+          totalClipCount: imageRows.length,
+        };
+      }
+
+      const { data: transitionedProject, error: projectError } = await supabase
+        .from("projects")
+        .update({
+          error_message: null,
+          status: "media_qc",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", context.providerJob.project_id)
+        .eq("status", "generating_video")
+        .select("id")
+        .maybeSingle();
+
+      if (projectError) {
+        throw projectError;
+      }
+
+      if (!transitionedProject) {
+        await writePipelineLog({
+          message:
+            "All KIE callback clips are stored; media QC resume was already claimed.",
+          metadata: {
+            readyClipCount: readyImages.length,
+            totalClipCount: imageRows.length,
+          },
+          projectId: context.providerJob.project_id,
+          status: "skipped",
+          step: "video_generation",
+        });
+
+        return {
+          ready: true,
+          readyClipCount: readyImages.length,
+          shouldResumePipeline: false,
+          totalClipCount: imageRows.length,
+        };
+      }
+
+      await writePipelineLog({
+        message: "All KIE callback clips are stored. Project is ready for media QC.",
+        metadata: {
+          readyClipCount: readyImages.length,
+          totalClipCount: imageRows.length,
+        },
+        projectId: context.providerJob.project_id,
+        status: "completed",
+        step: "video_generation",
+      });
+
+      return {
+        ready: true,
+        readyClipCount: readyImages.length,
+        shouldResumePipeline: true,
+        totalClipCount: imageRows.length,
+      };
+    });
+
+    if (!clipReadiness.ready) {
+      return {
+        ...generatedClip,
+        ok: true,
+        status: "generating_video",
+      };
+    }
+
+    if (!clipReadiness.shouldResumePipeline) {
+      return {
+        ...generatedClip,
+        ok: true,
+        status: "media_qc",
+      };
+    }
+
     await step.sendEvent("resume-project-media-qc", {
       name: PROJECT_SUBMITTED_EVENT,
       data: {
-        imageCount: 1,
+        imageCount: clipReadiness.readyClipCount,
         organizationId: context.project.organization_id,
         projectId: context.providerJob.project_id,
         submittedBy: "kie-callback-processor",

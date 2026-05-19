@@ -1,5 +1,9 @@
 import Link from "next/link";
-import { updateAdminProviderJobStatus } from "@/app/admin/actions";
+import {
+  markStaleAdminProviderJobForRetry,
+  resetAndRetryAdminProviderJob,
+  updateAdminProviderJobStatus,
+} from "@/app/admin/actions";
 import {
   EmptyState,
   StatusBadge,
@@ -20,6 +24,12 @@ function formatCost(value: number | null) {
     style: "currency",
   }).format(value);
 }
+
+const RETRYABLE_PROVIDER_JOB_STATUSES = new Set([
+  "failed",
+  "requires_manual_retry",
+  "canceled",
+]);
 
 export default async function AdminProviderJobsPage() {
   await requirePlatformAdmin();
@@ -87,7 +97,15 @@ export default async function AdminProviderJobsPage() {
                       </p>
                     </td>
                     <td className="px-4 py-3">
-                      <StatusBadge status={job.status} />
+                      <div className="flex flex-wrap gap-2">
+                        <StatusBadge status={job.status} />
+                        {job.isStale ? <StatusBadge status="stale" /> : null}
+                      </div>
+                      {job.isStale && job.staleMinutes !== null ? (
+                        <p className="mt-2 text-xs text-[#ffd7dd]">
+                          No provider progress for {job.staleMinutes} minutes.
+                        </p>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3 font-mono">
                       {job.creditsConsumed ?? "n/a"}
@@ -130,6 +148,46 @@ export default async function AdminProviderJobsPage() {
                           Save
                         </button>
                       </form>
+                      {job.isStale ? (
+                        <form
+                          action={markStaleAdminProviderJobForRetry}
+                          className="mt-2"
+                        >
+                          <input name="providerJobId" type="hidden" value={job.id} />
+                          <input
+                            name="redirectTo"
+                            type="hidden"
+                            value="/admin/provider-jobs"
+                          />
+                          <button
+                            className="h-9 rounded-md border border-[#ff9aaa]/30 bg-[#782f3d]/30 px-2 text-xs text-[#ffd7dd] hover:bg-[#782f3d]/50"
+                            title="Marks this stuck running job as requiring manual retry."
+                            type="submit"
+                          >
+                            Mark stale
+                          </button>
+                        </form>
+                      ) : null}
+                      {RETRYABLE_PROVIDER_JOB_STATUSES.has(job.status) ? (
+                        <form
+                          action={resetAndRetryAdminProviderJob}
+                          className="mt-2"
+                        >
+                          <input name="providerJobId" type="hidden" value={job.id} />
+                          <input
+                            name="redirectTo"
+                            type="hidden"
+                            value="/admin/provider-jobs"
+                          />
+                          <button
+                            className="h-9 rounded-md bg-[var(--brass)] px-2 text-xs font-semibold text-[#19130b] hover:bg-[#e6c57d]"
+                            title="Deletes the provider-job lock and queues this step again. May consume provider credits."
+                            type="submit"
+                          >
+                            Reset & retry
+                          </button>
+                        </form>
+                      ) : null}
                     </td>
                   </tr>
                 ))}

@@ -80,6 +80,38 @@ export interface ImageEnhancementAnalysisResult {
   sourceStorageKey?: string;
 }
 
+export interface KlingModeClassificationImage {
+  enhancedImage: Uint8Array;
+  enhancedStorageKey?: string;
+  imageId: string;
+  orderIndex: number;
+  sourceMimeType: string;
+}
+
+const KlingModeSchema = z.enum(["single_shot", "multi_shot"]);
+const KlingModeDecisionSchema = z.object({
+  imageId: z.string(),
+  orderIndex: z.number().int().nonnegative(),
+  perspectiveScore: z.number().min(1).max(10).catch(5),
+  promptFile: z.string().catch("single-shot.md"),
+  reason: z.string().catch("Selected by Video Agent."),
+  selectedMode: KlingModeSchema,
+});
+export const KlingModeClassificationSchema = z.object({
+  decisions: z.array(KlingModeDecisionSchema),
+  multiShotImageIds: z.array(z.string()).catch([]),
+  singleShotImageIds: z.array(z.string()).catch([]),
+  summary: z.string().catch("Images classified for Kling generation."),
+});
+
+export type KlingModeClassificationResult = z.infer<
+  typeof KlingModeClassificationSchema
+> & {
+  model: string;
+  provider: "gemini";
+  rawResponseText?: string;
+};
+
 interface GeminiInlineData {
   data?: string;
   mimeType?: string;
@@ -106,6 +138,7 @@ interface GeminiResponse {
 
 const ENHANCEMENT_ANALYSIS_MODEL =
   process.env.GEMINI_IMAGE_ANALYSIS_MODEL ?? "gemini-2.5-pro";
+const VIDEO_AGENT_MODEL = process.env.GEMINI_VIDEO_AGENT_MODEL ?? "gemini-2.5-pro";
 const ENHANCEMENT_ANALYSIS_RESPONSE_SCHEMA = {
   properties: {
     colorLocks: {
@@ -162,6 +195,40 @@ const ENHANCEMENT_ANALYSIS_RESPONSE_SCHEMA = {
     "riskNotes",
     "uncertainObservations",
   ],
+  type: "OBJECT",
+} as const;
+const KLING_MODE_CLASSIFICATION_RESPONSE_SCHEMA = {
+  properties: {
+    decisions: {
+      items: {
+        properties: {
+          imageId: { type: "STRING" },
+          orderIndex: { type: "NUMBER" },
+          perspectiveScore: { type: "NUMBER" },
+          promptFile: { type: "STRING" },
+          reason: { type: "STRING" },
+          selectedMode: {
+            enum: ["single_shot", "multi_shot"],
+            type: "STRING",
+          },
+        },
+        required: [
+          "imageId",
+          "orderIndex",
+          "selectedMode",
+          "promptFile",
+          "perspectiveScore",
+          "reason",
+        ],
+        type: "OBJECT",
+      },
+      type: "ARRAY",
+    },
+    multiShotImageIds: { items: { type: "STRING" }, type: "ARRAY" },
+    singleShotImageIds: { items: { type: "STRING" }, type: "ARRAY" },
+    summary: { type: "STRING" },
+  },
+  required: ["multiShotImageIds", "singleShotImageIds", "decisions", "summary"],
   type: "OBJECT",
 } as const;
 
@@ -356,6 +423,131 @@ export async function analyzeImageForEnhancement(
     provider: "gemini",
     rawResponseText: responseText,
     sourceStorageKey: input.sourceStorageKey,
+  };
+}
+
+export async function classifyImagesForKlingModes({
+  images,
+  prompt,
+}: {
+  images: KlingModeClassificationImage[];
+  prompt: string;
+}): Promise<KlingModeClassificationResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is required for Video Agent analysis.");
+  }
+
+  if (images.length === 0) {
+    throw new Error("Video Agent analysis requires at least one image.");
+  }
+
+  const imageManifest = images
+    .map((image, index) =>
+      [
+        `Image ${index + 1}`,
+        `imageId: ${image.imageId}`,
+        `orderIndex: ${image.orderIndex}`,
+        image.enhancedStorageKey
+          ? `enhancedStorageKey: ${image.enhancedStorageKey}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join("\n"),
+    )
+    .join("\n\n");
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${VIDEO_AGENT_MODEL}:generateContent`,
+    {
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                text: [
+                  prompt,
+                  "Return only valid JSON matching the required output contract.",
+                  "Classify these enhanced images. Each inline image follows its matching manifest entry.",
+                  imageManifest,
+                ].join("\n\n"),
+              },
+              ...images.flatMap((image, index) => [
+                {
+                  text: `Inline image ${index + 1}: imageId ${image.imageId}, orderIndex ${image.orderIndex}`,
+                },
+                {
+                  inline_data: {
+                    data: Buffer.from(image.enhancedImage).toString("base64"),
+                    mime_type: image.sourceMimeType,
+                  },
+                },
+              ]),
+            ],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: KLING_MODE_CLASSIFICATION_RESPONSE_SCHEMA,
+          temperature: 0.1,
+        },
+      }),
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      method: "POST",
+    },
+  );
+
+  const json = (await response.json()) as GeminiResponse;
+
+  if (!response.ok) {
+    throw new Error(
+      `Gemini Video Agent analysis failed (${response.status}): ${
+        json.error?.message ?? response.statusText
+      }`,
+    );
+  }
+
+  const parts = json.candidates?.flatMap(
+    (candidate) => candidate.content?.parts ?? [],
+  );
+  const responseText = getTextResponse(parts);
+
+  if (!responseText) {
+    throw new Error("Gemini Video Agent analysis did not return text.");
+  }
+
+  const parsed = KlingModeClassificationSchema.safeParse(
+    parseJsonResponse(responseText),
+  );
+
+  if (!parsed.success) {
+    throw new Error(
+      `Gemini Video Agent analysis returned invalid JSON: ${parsed.error.message}`,
+    );
+  }
+
+  const inputImageIds = new Set(images.map((image) => image.imageId));
+  const decisionImageIds = new Set(
+    parsed.data.decisions.map((decision) => decision.imageId),
+  );
+
+  if (
+    parsed.data.decisions.length !== images.length ||
+    images.some((image) => !decisionImageIds.has(image.imageId)) ||
+    parsed.data.decisions.some((decision) => !inputImageIds.has(decision.imageId))
+  ) {
+    throw new Error("Gemini Video Agent analysis did not classify every image.");
+  }
+
+  return {
+    ...parsed.data,
+    model: VIDEO_AGENT_MODEL,
+    provider: "gemini",
+    rawResponseText: responseText,
   };
 }
 

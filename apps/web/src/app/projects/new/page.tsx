@@ -21,8 +21,13 @@ export default async function NewProjectPage({
   searchParams,
 }: NewProjectPageProps) {
   const { message } = await searchParams;
-  const { organization } = await getRequiredWorkspace();
+  const { organization, supabase } = await getRequiredWorkspace();
   const imageRequirements = getVideoImageRequirements();
+  const { data: musicTracks } = await supabase
+    .from("music_tracks")
+    .select("id, name, genre, duration_seconds")
+    .eq("is_active", true)
+    .order("created_at", { ascending: false });
 
   return (
     <main className="app-shell fine-grid min-h-screen px-4 py-6 text-[var(--foreground)] sm:px-6 lg:px-8">
@@ -57,6 +62,12 @@ export default async function NewProjectPage({
 
           <NewProjectForm
             imageRequirements={imageRequirements}
+            musicTracks={(musicTracks ?? []).map((track) => ({
+              durationSeconds: track.duration_seconds,
+              genre: track.genre,
+              id: track.id,
+              name: track.name,
+            }))}
             organizationId={organization.id}
           />
         </section>
@@ -82,8 +93,9 @@ export default async function NewProjectPage({
               <div className="flex gap-3">
                 <Mic2 className="mt-0.5 size-4 text-[var(--brass)]" />
                 <p>
-                  The selected speaker and music type are stored with the
-                  project and will feed the narration and edit stages.
+                  The selected speaker, music type, and optional track are
+                  stored with the project and feed the narration and edit
+                  stages.
                 </p>
               </div>
               <div className="flex gap-3">

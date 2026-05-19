@@ -111,6 +111,32 @@ export function getErrorMessage(error: unknown) {
   return "Unknown provider job error.";
 }
 
+function optionalNumberFromEnv(name: string) {
+  const value = process.env[name];
+
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function estimateKieCostUsd(creditsConsumed: number | null | undefined) {
+  const unitCostUsd = optionalNumberFromEnv("KIE_CREDIT_UNIT_COST_USD");
+
+  if (unitCostUsd === null || creditsConsumed === null || creditsConsumed === undefined) {
+    return null;
+  }
+
+  return Math.round(creditsConsumed * unitCostUsd * 1_000_000) / 1_000_000;
+}
+
+export function estimatedGeminiImageEnhancementCostUsd() {
+  return optionalNumberFromEnv("GEMINI_IMAGE_ENHANCEMENT_ESTIMATED_COST_USD");
+}
+
 export async function getProviderJobByKey(idempotencyKey: string) {
   const supabase = createAdminClient();
   const { data, error } = await supabase

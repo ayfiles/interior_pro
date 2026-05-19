@@ -9,6 +9,14 @@ import { resumeAdminProjectPipeline } from "@/app/admin/actions";
 import { requirePlatformAdmin } from "@/lib/admin/auth";
 import { listAdminProjects } from "@/lib/admin/data";
 
+function formatCost(value: number) {
+  return new Intl.NumberFormat("en", {
+    currency: "USD",
+    maximumFractionDigits: 4,
+    style: "currency",
+  }).format(value);
+}
+
 export default async function AdminProjectsPage() {
   await requirePlatformAdmin();
 
@@ -24,7 +32,7 @@ export default async function AdminProjectsPage() {
       <section className="rounded-lg border border-[var(--line)] bg-[rgba(20,17,14,0.86)]">
         {projects.length ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1120px] text-left text-sm">
+            <table className="w-full min-w-[1280px] text-left text-sm">
               <thead className="text-xs uppercase text-[var(--muted)]">
                 <tr className="border-b border-[var(--line)]">
                   <th className="px-4 py-3 font-medium">Project</th>
@@ -32,6 +40,8 @@ export default async function AdminProjectsPage() {
                   <th className="px-4 py-3 font-medium">Status</th>
                   <th className="px-4 py-3 font-medium">Images</th>
                   <th className="px-4 py-3 font-medium">Provider Jobs</th>
+                  <th className="px-4 py-3 font-medium">Credits</th>
+                  <th className="px-4 py-3 font-medium">Cost</th>
                   <th className="px-4 py-3 font-medium">Updated</th>
                   <th className="px-4 py-3 font-medium">Action</th>
                 </tr>
@@ -75,6 +85,12 @@ export default async function AdminProjectsPage() {
                           {project.providerJobIssues} issue
                         </span>
                       ) : null}
+                    </td>
+                    <td className="px-4 py-3 font-mono">
+                      {project.providerCredits.toFixed(2)}
+                    </td>
+                    <td className="px-4 py-3 font-mono">
+                      {formatCost(project.providerCostUsd)}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-[var(--muted)]">
                       {formatDateTime(project.updatedAt)}

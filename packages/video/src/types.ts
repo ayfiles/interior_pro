@@ -49,11 +49,27 @@ export interface VoiceoverPlan {
 }
 
 export interface MusicInstructionPlan {
+  bpmEstimate: number | null;
   cutPointsSeconds: number[];
+  doNotHardCutAfterSeconds: number | null;
+  fadeSeconds: {
+    in?: {
+      duration: number;
+      start: number;
+    };
+    out?: {
+      duration: number;
+      start: number;
+    };
+  } | null;
   genre: string;
   instructions: string;
+  minHardCutSpacingSeconds: number | null;
+  preferredHardCutSpacingSeconds: number[];
+  secondaryAccentPointsSeconds: number[];
   trackDurationSeconds: number | null;
   trackName: string | null;
+  trackPlanSource: "default" | "track";
   trackStorageKey: string | null;
   usableStartSeconds: number;
 }

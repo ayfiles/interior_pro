@@ -2,12 +2,14 @@ import { AI_PROVIDERS, getVideoImageRequirements } from "@interior-pro/shared";
 import { STORAGE_BUCKETS } from "@interior-pro/supabase";
 import {
   analyzeImageForEnhancement,
+  classifyImagesForKlingModes,
   createKieKling30Task,
   enhanceImageWithNanoBananaPro,
   generateVoiceoverAudio,
   getKieTaskRecord,
   runMediaQcOnVideoBytes,
   type ImageEnhancementAnalysisResult,
+  type KlingModeClassificationResult,
   type MediaQcReport,
 } from "@interior-pro/pipeline";
 import path from "node:path";
@@ -23,8 +25,11 @@ import {
 import { inngest, PROJECT_SUBMITTED_EVENT } from "@/inngest/client";
 import {
   buildProviderJobKey,
+  estimatedGeminiImageEnhancementCostUsd,
   ensureProviderJob,
+  estimateKieCostUsd,
   getErrorMessage,
+  getProviderJobByKey,
   updateProviderJob,
   type ProviderJob,
 } from "@/inngest/provider-jobs";
@@ -59,6 +64,7 @@ type MediaQcClipResult = {
   report: MediaQcReport;
   skipped: boolean;
 };
+type KlingGenerationMode = "single_shot" | "multi_shot";
 
 const IMAGE_REQUIREMENTS = getVideoImageRequirements();
 const UPSCALING_PROMPT_PATH = path.join(
@@ -69,9 +75,17 @@ const ENHANCEMENT_AGENT_PROMPT_PATH = path.join(
   process.cwd(),
   "src/inngest/prompts/enhancement-agent.md",
 );
+const VIDEO_AGENT_PROMPT_PATH = path.join(
+  process.cwd(),
+  "src/inngest/prompts/agent.md",
+);
 const SINGLE_SHOT_PROMPT_PATH = path.join(
   process.cwd(),
   "src/inngest/prompts/single-shot.md",
+);
+const MULTI_SHOT_PROMPT_PATH = path.join(
+  process.cwd(),
+  "src/inngest/prompts/multi-shot.md",
 );
 const REMOTION_ENTRY_POINT = path.resolve(
   process.cwd(),
@@ -83,6 +97,25 @@ const KLING_SINGLE_SHOT_TEST_CONFIG = {
   mode: "pro" as const,
   multiShots: false,
   sound: false,
+};
+const KLING_GENERATION_MODES: Record<
+  KlingGenerationMode,
+  {
+    multiShots: boolean;
+    promptPath: string;
+    promptSlug: "multi-shot" | "single-shot";
+  }
+> = {
+  multi_shot: {
+    multiShots: true,
+    promptPath: MULTI_SHOT_PROMPT_PATH,
+    promptSlug: "multi-shot",
+  },
+  single_shot: {
+    multiShots: false,
+    promptPath: SINGLE_SHOT_PROMPT_PATH,
+    promptSlug: "single-shot",
+  },
 };
 const KLING_POLL_INTERVAL_SECONDS = 10;
 const KLING_MAX_POLLS = 90;
@@ -182,6 +215,10 @@ function isJsonObject(value: unknown): value is Record<string, Json> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function isKlingGenerationMode(value: unknown): value is KlingGenerationMode {
+  return value === "single_shot" || value === "multi_shot";
+}
+
 function getExistingMediaQc(analysis: Json | null) {
   if (!isJsonObject(analysis)) {
     return null;
@@ -258,6 +295,36 @@ function mergeEnhancementBriefAnalysis({
       sourceStorageKey: result.sourceStorageKey ?? null,
     },
   } as Json;
+}
+
+function mergeVideoAgentDecisionAnalysis({
+  analysis,
+  decision,
+  promptPath,
+  result,
+}: {
+  analysis: Json | null;
+  decision: KlingModeClassificationResult["decisions"][number];
+  promptPath: string;
+  result: KlingModeClassificationResult;
+}): Json {
+  const baseAnalysis = isJsonObject(analysis) ? analysis : {};
+
+  return {
+    ...baseAnalysis,
+    videoAgent: {
+      decision: decision as unknown as Json,
+      generatedAt: new Date().toISOString(),
+      model: result.model,
+      promptPath,
+      provider: result.provider,
+      summary: result.summary,
+    },
+  } as Json;
+}
+
+function hasExistingVideoAgentAnalysis(analysis: Json | null) {
+  return isJsonObject(analysis) && isJsonObject(analysis.videoAgent);
 }
 
 function mergeImageEnhancementAnalysis({
@@ -397,6 +464,31 @@ function buildUpscalingProviderJobKey({
 }
 
 function buildKlingProviderJobKey({
+  clipStorageKey,
+  generationMode,
+  imageId,
+  projectId,
+}: {
+  clipStorageKey: string;
+  generationMode: KlingGenerationMode;
+  imageId: string;
+  projectId: string;
+}) {
+  return buildProviderJobKey([
+    "project",
+    projectId,
+    "image",
+    imageId,
+    "video-generation",
+    "kling-3.0-pro",
+    generationMode,
+    clipStorageKey,
+    KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+    KLING_SINGLE_SHOT_TEST_CONFIG.mode,
+  ]);
+}
+
+function buildLegacyKlingProviderJobKey({
   clipStorageKey,
   imageId,
   projectId,
@@ -1169,6 +1261,7 @@ export const projectPipeline = inngest.createFunction(
 
             await updateProviderJob(providerJob.job.id, {
               completed_at: new Date().toISOString(),
+              estimated_cost_usd: estimatedGeminiImageEnhancementCostUsd(),
               output_storage_key: outputStorageKey,
               response: {
                 model: result.model,
@@ -1228,15 +1321,13 @@ export const projectPipeline = inngest.createFunction(
     const enhancedStorageKeys = new Map(
       enhancedImages.map((image) => [image.imageId, image.outputStorageKey]),
     );
-    const videoImages = context.images
-      .map((image) => ({
+    const videoImageSources = context.images.map((image) => ({
         ...image,
         upscaled_storage_key:
           image.upscaled_storage_key ??
           enhancedStorageKeys.get(image.id) ??
           null,
-      }))
-      .slice(0, 1);
+      }));
     const kieCallbackUrl = getKieCallbackUrl();
     const shouldUseKieCallback = Boolean(kieCallbackUrl);
     const generatedClips: GeneratedClipResult[] = [];
@@ -1249,34 +1340,192 @@ export const projectPipeline = inngest.createFunction(
     ].includes(context.project.status);
 
     if (shouldRunVideoGeneration) {
-      await step.run("start-video-generation", async () => {
-      await updateProjectStatus(projectId, "generating_video");
-      await writePipelineLog({
-        message: "Kling video generation step started.",
-        metadata: {
-          imageCount: context.images.length,
-          jobCount: videoImages.length,
-          mode: "real",
-          promptPath: SINGLE_SHOT_PROMPT_PATH,
-          provider: AI_PROVIDERS.imageToVideo.primary,
-          request: {
-            aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
-            callbackEnabled: shouldUseKieCallback,
-            duration: String(KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds),
-            mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
-            multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
-            sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
-          },
+      const modeAssignments = await step.run(
+        "assign-kling-generation-modes",
+        async () => {
+          const existingAssignments = videoImageSources
+            .filter(
+              (image) =>
+                isKlingGenerationMode(image.prompt_type) &&
+                hasExistingVideoAgentAnalysis(image.analysis),
+            )
+            .map((image) => ({
+              imageId: image.id,
+              orderIndex: image.order_index,
+              perspectiveScore: null,
+              promptFile:
+                image.prompt_type === "multi_shot"
+                  ? "multi-shot.md"
+                  : "single-shot.md",
+              reason: "Existing Video Agent assignment reused.",
+              selectedMode: image.prompt_type as KlingGenerationMode,
+            }));
+
+          if (existingAssignments.length === videoImageSources.length) {
+            return existingAssignments;
+          }
+
+          const supabase = createAdminClient();
+          const videoAgentPrompt = await loadPipelinePrompt("agent");
+          const sourceById = new Map(
+            videoImageSources.map((image) => [image.id, image]),
+          );
+          const classificationImages = await Promise.all(
+            videoImageSources.map(async (image) => {
+              if (!image.upscaled_storage_key) {
+                throw new Error(
+                  `Image ${image.order_index + 1} has no enhanced storage key for Video Agent analysis.`,
+                );
+              }
+
+              const { data: file, error } = await supabase.storage
+                .from(STORAGE_BUCKETS.sourceAssets)
+                .download(image.upscaled_storage_key);
+
+              if (error) {
+                throw error;
+              }
+
+              if (!file) {
+                throw new Error(
+                  `Could not download enhanced image ${image.order_index + 1} for Video Agent analysis.`,
+                );
+              }
+
+              return {
+                enhancedImage: new Uint8Array(await file.arrayBuffer()),
+                enhancedStorageKey: image.upscaled_storage_key,
+                imageId: image.id,
+                orderIndex: image.order_index,
+                sourceMimeType: inferImageMimeType(image.upscaled_storage_key),
+              };
+            }),
+          );
+          const result = await classifyImagesForKlingModes({
+            images: classificationImages,
+            prompt: videoAgentPrompt,
+          });
+          const multiShotCount = result.decisions.filter(
+            (decision) => decision.selectedMode === "multi_shot",
+          ).length;
+
+          if (videoImageSources.length >= 5 && multiShotCount !== 2) {
+            throw new Error(
+              `Video Agent selected ${multiShotCount} multi-shot images; expected exactly 2.`,
+            );
+          }
+
+          for (const decision of result.decisions) {
+            const sourceImage = sourceById.get(decision.imageId);
+
+            if (!sourceImage) {
+              throw new Error(
+                `Video Agent returned unknown image id ${decision.imageId}.`,
+              );
+            }
+
+            const { data: latestImage, error: latestImageError } = await supabase
+              .from("project_images")
+              .select("analysis")
+              .eq("id", decision.imageId)
+              .single();
+
+            if (latestImageError) {
+              throw latestImageError;
+            }
+
+            const { error } = await supabase
+              .from("project_images")
+              .update({
+                analysis: mergeVideoAgentDecisionAnalysis({
+                  analysis: latestImage.analysis ?? sourceImage.analysis,
+                  decision,
+                  promptPath: VIDEO_AGENT_PROMPT_PATH,
+                  result,
+                }),
+                prompt_type: decision.selectedMode,
+              })
+              .eq("id", decision.imageId);
+
+            if (error) {
+              throw error;
+            }
+          }
+
+          await writePipelineLog({
+            message: "Video Agent assigned Kling generation modes for all enhanced images.",
+            metadata: {
+              decisions: result.decisions,
+              model: result.model,
+              multiShotImageIds: result.multiShotImageIds,
+              promptPath: VIDEO_AGENT_PROMPT_PATH,
+              provider: result.provider,
+              singleShotImageIds: result.singleShotImageIds,
+              summary: result.summary,
+            },
+            projectId,
+            status: "completed",
+            step: "video_agent",
+          });
+
+          return result.decisions;
         },
-        projectId,
-        status: "started",
-        step: "video_generation",
-      });
+      );
+      const modeByImageId = new Map(
+        modeAssignments.map((assignment) => [
+          assignment.imageId,
+          assignment.selectedMode,
+        ]),
+      );
+      const videoImages = videoImageSources.map((image) => ({
+        ...image,
+        klingMode: modeByImageId.get(image.id) ?? "single_shot",
+      }));
+      const modeCounts = videoImages.reduce<Record<KlingGenerationMode, number>>(
+        (counts, image) => {
+          counts[image.klingMode] += 1;
+          return counts;
+        },
+        {
+          multi_shot: 0,
+          single_shot: 0,
+        },
+      );
+
+      await step.run("start-video-generation", async () => {
+        await updateProjectStatus(projectId, "generating_video");
+        await writePipelineLog({
+          message: "Kling video generation step started.",
+          metadata: {
+            imageCount: context.images.length,
+            jobCount: videoImages.length,
+            mode: "real",
+            modeCounts,
+            promptPaths: {
+              multi_shot: MULTI_SHOT_PROMPT_PATH,
+              single_shot: SINGLE_SHOT_PROMPT_PATH,
+            },
+            provider: AI_PROVIDERS.imageToVideo.primary,
+            request: {
+              aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
+              callbackEnabled: shouldUseKieCallback,
+              duration: String(KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds),
+              mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
+              sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
+            },
+          },
+          projectId,
+          status: "started",
+          step: "video_generation",
+        });
       });
 
-      const singleShotPrompt = await step.run(
-        "load-kling-single-shot-prompt",
-        async () => loadPipelinePrompt("single-shot"),
+      const klingPrompts = await step.run(
+        "load-kling-prompts",
+        async () => ({
+          multi_shot: await loadPipelinePrompt("multi-shot"),
+          single_shot: await loadPipelinePrompt("single-shot"),
+        }),
       );
 
       for (const image of videoImages) {
@@ -1284,6 +1533,9 @@ export const projectPipeline = inngest.createFunction(
         `start-kling-clip-${image.order_index + 1}`,
         async () => {
           const supabase = createAdminClient();
+          const generationMode = image.klingMode;
+          const generationConfig = KLING_GENERATION_MODES[generationMode];
+          const klingPrompt = klingPrompts[generationMode];
 
           if (
             isExistingRealClip({
@@ -1334,29 +1586,42 @@ export const projectPipeline = inngest.createFunction(
           const clipStorageKey = buildClipStorageKey(
             image.upscaled_storage_key,
           );
-          const providerJob = await ensureProviderJob({
-            idempotencyKey: buildKlingProviderJobKey({
+          const idempotencyKey = buildKlingProviderJobKey({
+            clipStorageKey,
+            generationMode,
+            imageId: image.id,
+            projectId,
+          });
+          const legacyProviderJob = await getProviderJobByKey(
+            buildLegacyKlingProviderJobKey({
               clipStorageKey,
               imageId: image.id,
               projectId,
             }),
-            model: "kling-3.0/video",
-            outputStorageKey: clipStorageKey,
-            projectId,
-            projectImageId: image.id,
-            provider: AI_PROVIDERS.imageToVideo.primary,
-            request: {
-              aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
-              callbackEnabled: shouldUseKieCallback,
-              durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
-              imageStorageKey: image.upscaled_storage_key,
-              mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
-              multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
-              promptPath: SINGLE_SHOT_PROMPT_PATH,
-              sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
-            },
-            step: "video_generation",
-          });
+          );
+          const providerJob: { created: boolean; job: ProviderJob } =
+            legacyProviderJob
+              ? { created: false, job: legacyProviderJob }
+              : await ensureProviderJob({
+                  idempotencyKey,
+                  model: "kling-3.0/video",
+                  outputStorageKey: clipStorageKey,
+                  projectId,
+                  projectImageId: image.id,
+                  provider: AI_PROVIDERS.imageToVideo.primary,
+                  request: {
+                    aspectRatio: KLING_SINGLE_SHOT_TEST_CONFIG.aspectRatio,
+                    callbackEnabled: shouldUseKieCallback,
+                    durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+                    generationMode,
+                    imageStorageKey: image.upscaled_storage_key,
+                    mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
+                    multiShots: generationConfig.multiShots,
+                    promptPath: generationConfig.promptPath,
+                    sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
+                  },
+                  step: "video_generation",
+                });
 
           if (!providerJob.created) {
             if (
@@ -1470,8 +1735,8 @@ export const projectPipeline = inngest.createFunction(
               durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
               imageUrls: [signedImage.signedUrl],
               mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
-              multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
-              prompt: singleShotPrompt,
+              multiShots: generationConfig.multiShots,
+              prompt: klingPrompt,
               sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
             });
           } catch (error) {
@@ -1500,11 +1765,12 @@ export const projectPipeline = inngest.createFunction(
               clipStorageKey,
               callbackEnabled: shouldUseKieCallback,
               durationSeconds: KLING_SINGLE_SHOT_TEST_CONFIG.durationSeconds,
+              generationMode,
               imageId: image.id,
               mode: KLING_SINGLE_SHOT_TEST_CONFIG.mode,
               model: "kling-3.0/video",
-              multiShots: KLING_SINGLE_SHOT_TEST_CONFIG.multiShots,
-              promptPath: SINGLE_SHOT_PROMPT_PATH,
+              multiShots: generationConfig.multiShots,
+              promptPath: generationConfig.promptPath,
               provider: AI_PROVIDERS.imageToVideo.primary,
               providerJobId: providerJob.job.id,
               sound: KLING_SINGLE_SHOT_TEST_CONFIG.sound,
@@ -1594,6 +1860,7 @@ export const projectPipeline = inngest.createFunction(
 
             await updateProviderJob(activeTask.providerJobId, {
               credits_consumed: record.creditsConsumed ?? null,
+              estimated_cost_usd: estimateKieCostUsd(record.creditsConsumed),
               error_message: record.failMsg ?? null,
               failed_at:
                 record.state === "fail" || record.state === "failed"
@@ -1777,6 +2044,7 @@ export const projectPipeline = inngest.createFunction(
             await updateProviderJob(activeTask.providerJobId, {
               completed_at: new Date().toISOString(),
               credits_consumed: taskRecord.creditsConsumed ?? null,
+              estimated_cost_usd: estimateKieCostUsd(taskRecord.creditsConsumed),
               file_size_bytes: clipBytes.byteLength,
               output_storage_key: activeTask.clipStorageKey,
               response: {
@@ -1887,8 +2155,12 @@ export const projectPipeline = inngest.createFunction(
           metadata: {
             generatedClips,
             mode: "real",
+            modeCounts,
             nextStatus: "media_qc",
-            promptPath: SINGLE_SHOT_PROMPT_PATH,
+            promptPaths: {
+              multi_shot: MULTI_SHOT_PROMPT_PATH,
+              single_shot: SINGLE_SHOT_PROMPT_PATH,
+            },
             provider: AI_PROVIDERS.imageToVideo.primary,
           },
           projectId,
@@ -2371,35 +2643,73 @@ export const projectPipeline = inngest.createFunction(
       if (context.project.music_genre === "no_music") {
         return {
           durationSeconds: null,
+          instructionsMd: null,
           name: null,
+          planJson: null,
           storageKey: null,
         };
       }
 
-      const { data, error } = await supabase
+      const musicQuery = supabase
         .from("music_tracks")
-        .select("duration_seconds, file_storage_key, name")
-        .eq("genre", context.project.music_genre)
-        .eq("is_active", true)
-        .order("created_at", { ascending: false })
+        .select(
+          "duration_seconds, file_storage_key, instructions_md, name, plan_json",
+        )
+        .eq("is_active", true);
+      const selectedMusicQuery = context.project.music_id
+        ? musicQuery.eq("id", context.project.music_id)
+        : musicQuery
+            .eq("genre", context.project.music_genre)
+            .order("created_at", { ascending: false });
+      const { data, error } = await selectedMusicQuery
         .limit(1)
         .maybeSingle();
 
       if (error) {
-        throw error;
+        if (error.code !== "42703") {
+          throw error;
+        }
+
+        const fallbackQuery = supabase
+          .from("music_tracks")
+          .select("duration_seconds, file_storage_key, name")
+          .eq("is_active", true);
+        const selectedFallbackQuery = context.project.music_id
+          ? fallbackQuery.eq("id", context.project.music_id)
+          : fallbackQuery
+              .eq("genre", context.project.music_genre)
+              .order("created_at", { ascending: false });
+        const { data: fallbackData, error: fallbackError } =
+          await selectedFallbackQuery.limit(1).maybeSingle();
+
+        if (fallbackError) {
+          throw fallbackError;
+        }
+
+        return {
+          durationSeconds: fallbackData?.duration_seconds ?? null,
+          instructionsMd: null,
+          name: fallbackData?.name ?? null,
+          planJson: null,
+          storageKey: fallbackData?.file_storage_key ?? null,
+        };
       }
 
       return {
         durationSeconds: data?.duration_seconds ?? null,
+        instructionsMd: data?.instructions_md ?? null,
         name: data?.name ?? null,
+        planJson: data?.plan_json ?? null,
         storageKey: data?.file_storage_key ?? null,
       };
     });
     const musicPlan = await step.run("build-music-instruction-plan", async () => {
       const plan = buildMusicInstructionPlan({
         musicGenre: context.project.music_genre,
+        trackInstructionsMd: musicContext.instructionsMd,
         trackDurationSeconds: musicContext.durationSeconds,
         trackName: musicContext.name,
+        trackPlanJson: musicContext.planJson,
         trackStorageKey: musicContext.storageKey,
       });
       const storageKey = buildProjectArtifactStorageKey({
