@@ -1,9 +1,12 @@
 import { STORAGE_BUCKETS } from "@interior-pro/supabase";
 import {
-  analyzeImageForEnhancement,
+  type ArchitecturalKlingMultiPromptVariant,
+  buildArchitecturalKlingMultiPrompt,
   classifyImagesForKlingModes,
-  enhanceImageWithNanoBananaPro,
+  createKieKling30Task,
+  enhanceImageWithKieNanoBananaPro,
   generateVoiceoverAudio,
+  getKieTaskRecord,
   runMediaQcOnVideoBytes,
 } from "@interior-pro/pipeline";
 import {
@@ -15,6 +18,7 @@ import {
   buildVoiceoverPlan,
   renderSalesPitchVideo,
   type SalesPitchRenderManifest,
+  type VideoLengthProfile,
 } from "@interior-pro/video";
 import { AI_PROVIDERS } from "@interior-pro/shared";
 import path from "node:path";
@@ -30,6 +34,7 @@ type TestStep =
   | "editor_agent"
   | "voice_music"
   | "remotion_render";
+type KlingGenerationMode = "single_shot" | "multi_shot";
 
 interface TestingAsset {
   bucket: string;
@@ -62,6 +67,17 @@ const TEST_STEP_ORDER: TestStep[] = [
   "voice_music",
   "remotion_render",
 ];
+const KLING_TEST_CONFIG = {
+  aspectRatio: "16:9" as const,
+  mode: "pro" as const,
+  sound: false,
+};
+const KLING_DURATION_SECONDS_BY_MODE: Record<KlingGenerationMode, number> = {
+  multi_shot: 10,
+  single_shot: 5,
+};
+const KLING_POLL_INTERVAL_MS = 10_000;
+const KLING_MAX_POLLS = 90;
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -117,7 +133,25 @@ function extensionForContentType(contentType: string) {
     return "mp4";
   }
 
+  if (contentType === "video/quicktime") {
+    return "mov";
+  }
+
   return "json";
+}
+
+function getVideoContentType(response: Response) {
+  const contentType = response.headers.get("content-type")?.split(";")[0];
+
+  if (contentType?.startsWith("video/")) {
+    return contentType;
+  }
+
+  return "video/mp4";
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function testingOutputKey({
@@ -174,6 +208,186 @@ function getStepsForRun(targetStep: string, runMode: string): TestStep[] {
 
 function assetsByKind(assets: TestingAsset[], kind: string) {
   return assets.filter((asset) => asset.kind === kind);
+}
+
+async function loadTestingRunAssets(runId: string) {
+  const admin = createAdminClient();
+  const { data, error } = await admin
+    .from("testing_run_assets")
+    .select(
+      "id, kind, bucket, storage_key, file_name, content_type, file_size_bytes, metadata",
+    )
+    .eq("run_id", runId)
+    .order("created_at", { ascending: true });
+
+  if (error) {
+    throw error;
+  }
+
+  return (data ?? []) as TestingAsset[];
+}
+
+async function refreshTestingAssets(context: TestingRunContext) {
+  context.assets = await loadTestingRunAssets(context.run.id);
+  return context.assets;
+}
+
+function expectedDurationSecondsForClip(
+  context: TestingRunContext,
+  clip: TestingAsset,
+) {
+  if (
+    isJsonObject(clip.metadata) &&
+    typeof clip.metadata.durationSeconds === "number"
+  ) {
+    return clip.metadata.durationSeconds;
+  }
+
+  return typeof context.config.expectedDurationSeconds === "number"
+    ? context.config.expectedDurationSeconds
+    : null;
+}
+
+function normalizeKlingGenerationMode(value: unknown): KlingGenerationMode | null {
+  return value === "single_shot" || value === "multi_shot" ? value : null;
+}
+
+function generationModeFromDecision(value: unknown): KlingGenerationMode | null {
+  if (!isJsonObject(value)) {
+    return null;
+  }
+
+  const rawMode = value.selectedMode ?? value.mode ?? value.promptType;
+  return normalizeKlingGenerationMode(rawMode);
+}
+
+function multiShotVariantForIndex(
+  multiShotIndex: number,
+): ArchitecturalKlingMultiPromptVariant {
+  return multiShotIndex === 0 ? "five_scene" : "three_scene";
+}
+
+function multiShotSceneCountForVariant(
+  variant: ArchitecturalKlingMultiPromptVariant,
+) {
+  return variant === "three_scene" ? 3 : 5;
+}
+
+function shouldTagSegmentsAsMultiShot(
+  variant: ArchitecturalKlingMultiPromptVariant | null,
+) {
+  return variant === "five_scene";
+}
+
+function multiShotVariantFromAsset(
+  asset: TestingAsset,
+): ArchitecturalKlingMultiPromptVariant | null {
+  if (
+    !isJsonObject(asset.metadata) ||
+    (asset.metadata.multiShotVariant !== "five_scene" &&
+      asset.metadata.multiShotVariant !== "three_scene")
+  ) {
+    return null;
+  }
+
+  return asset.metadata.multiShotVariant;
+}
+
+interface TestingKlingClipPlanItem {
+  clipId: string;
+  duplicateIndex: number;
+  generationMode: KlingGenerationMode;
+  image: TestingAsset;
+  multiShotVariant: ArchitecturalKlingMultiPromptVariant | null;
+}
+
+function perspectiveScoreFromContext(context: TestingRunContext, image: TestingAsset) {
+  const result = context.config.videoAgentResult;
+
+  if (!isJsonObject(result) || !Array.isArray(result.decisions)) {
+    return 5;
+  }
+
+  const decision = result.decisions.find(
+    (item) => isJsonObject(item) && item.imageId === image.id,
+  );
+
+  return isJsonObject(decision) && typeof decision.perspectiveScore === "number"
+    ? decision.perspectiveScore
+    : 5;
+}
+
+function buildTestingKlingClipPlan({
+  context,
+  images,
+  requestedMode,
+}: {
+  context: TestingRunContext;
+  images: TestingAsset[];
+  requestedMode: KlingGenerationMode | null;
+}): TestingKlingClipPlanItem[] {
+  if (requestedMode) {
+    let multiShotIndex = 0;
+
+    return images.map((image, index) => {
+      const multiShotVariant =
+        requestedMode === "multi_shot"
+          ? multiShotVariantForIndex(multiShotIndex)
+          : null;
+
+      if (requestedMode === "multi_shot") {
+        multiShotIndex += 1;
+      }
+
+      return {
+        clipId: `image-${index + 1}-${requestedMode}`,
+        duplicateIndex: 1,
+        generationMode: requestedMode,
+        image,
+        multiShotVariant,
+      };
+    });
+  }
+
+  const rankedImages = [...images].sort(
+    (a, b) =>
+      perspectiveScoreFromContext(context, b) -
+        perspectiveScoreFromContext(context, a) ||
+      images.indexOf(a) - images.indexOf(b),
+  );
+  const rankByImageId = new Map(
+    rankedImages.map((image, index) => [image.id, index]),
+  );
+  const duplicateCount =
+    images.length <= 3 ? images.length : Math.max(0, 8 - images.length);
+  const plan: TestingKlingClipPlanItem[] = [];
+
+  for (const [index, image] of images.entries()) {
+    const rank = rankByImageId.get(image.id) ?? images.length;
+    const repeats = 1 + (rank < duplicateCount ? 1 : 0);
+
+    for (let duplicateIndex = 1; duplicateIndex <= repeats; duplicateIndex += 1) {
+      plan.push({
+        clipId: `image-${index + 1}-single-${duplicateIndex}`,
+        duplicateIndex,
+        generationMode: "single_shot",
+        image,
+        multiShotVariant: null,
+      });
+    }
+  }
+
+  for (const [index, image] of rankedImages.slice(0, Math.min(2, images.length)).entries()) {
+    plan.push({
+      clipId: `image-${images.indexOf(image) + 1}-multi-${index + 1}`,
+      duplicateIndex: 1,
+      generationMode: "multi_shot",
+      image,
+      multiShotVariant: multiShotVariantForIndex(index),
+    });
+  }
+
+  return plan;
 }
 
 function transientProviderError(error: unknown) {
@@ -275,6 +489,27 @@ async function downloadAsset(asset: TestingAsset) {
   }
 
   return new Uint8Array(await data.arrayBuffer());
+}
+
+async function createSignedAssetUrl(asset: TestingAsset, expiresInSeconds = 60 * 60) {
+  return createSignedStorageUrl(asset.bucket, asset.storage_key, expiresInSeconds);
+}
+
+async function createSignedStorageUrl(
+  bucket: string,
+  storageKey: string,
+  expiresInSeconds = 60 * 60,
+) {
+  const admin = createAdminClient();
+  const { data, error } = await admin.storage
+    .from(bucket)
+    .createSignedUrl(storageKey, expiresInSeconds);
+
+  if (error || !data?.signedUrl) {
+    throw error ?? new Error(`Could not sign asset ${storageKey}.`);
+  }
+
+  return data.signedUrl;
 }
 
 async function uploadTestingOutput({
@@ -444,7 +679,7 @@ async function runImageUpscaler(context: TestingRunContext) {
   if (!sourceImages.length) {
     await writeTestingLog({
       message:
-        "Enhancement + Image Upscaler skipped because no source images were uploaded.",
+        "Nano Banana Pro Upscaler skipped because no source images were uploaded.",
       runId: context.run.id,
       status: "skipped",
       step: "image_upscaler",
@@ -452,21 +687,26 @@ async function runImageUpscaler(context: TestingRunContext) {
     return [];
   }
 
-  const upscalingPrompt = await loadPipelinePrompt("upscaling");
-  const enhancementPrompt =
+  const promptOverride =
     typeof context.config.promptOverride === "string" &&
     context.config.promptOverride.trim()
       ? context.config.promptOverride.trim()
-      : await loadPipelinePrompt("enhancement-agent");
+      : null;
+  const upscalingPrompt =
+    promptOverride ?? (await loadPipelinePrompt("upscaling"));
   const notes =
     typeof context.config.notes === "string" ? context.config.notes : null;
   const outputs: TestingAsset[] = [];
 
   await writeTestingLog({
-    message: `Enhancement + Image Upscaler started for ${sourceImages.length} image(s).`,
+    message: `Nano Banana Pro Upscaler started for ${sourceImages.length} image(s) without Enhancement Agent.`,
     metadata: {
+      directPrompt: true,
+      enhancementAgentEnabled: false,
       model: AI_PROVIDERS.imageEnhancement.model,
+      promptSource: promptOverride ? "override" : "upscaling",
       provider: AI_PROVIDERS.imageEnhancement.primary,
+      targetResolution: "2K",
     },
     runId: context.run.id,
     status: "started",
@@ -479,36 +719,18 @@ async function runImageUpscaler(context: TestingRunContext) {
       image.storage_key,
       image.content_type,
     );
-    const brief = await runWithTransientProviderRetry({
-      label: `Enhancement analysis ${index + 1}`,
-      operation: () =>
-        analyzeImageForEnhancement({
-          prompt: enhancementPrompt,
-          sourceImage,
-          sourceMimeType,
-          sourceStorageKey: image.storage_key,
-        }),
-      runId: context.run.id,
-      step: "image_upscaler",
-    });
-    const briefOutput = await uploadJsonResult({
-      label: `Enhancement brief ${index + 1}`,
-      name: `enhancement-brief-${index + 1}`,
-      runId: context.run.id,
-      step: "image_upscaler",
-      value: brief as unknown as Json,
-    });
     const result = await runWithTransientProviderRetry({
       label: `Image upscale ${index + 1}`,
-      operation: () =>
-        enhanceImageWithNanoBananaPro({
+      operation: async () =>
+        enhanceImageWithKieNanoBananaPro({
           aspectRatio: "16:9",
           prompt: buildUpscalingPrompt({
             markdown: upscalingPrompt,
             notes,
-            preservationPrompt: brief.promptInsert,
+            preservationPrompt: null,
           }),
           sourceImage,
+          sourceImageUrl: await createSignedAssetUrl(image),
           sourceMimeType,
           sourceStorageKey: image.storage_key,
           targetResolution: "2K",
@@ -524,12 +746,16 @@ async function runImageUpscaler(context: TestingRunContext) {
       kind: "enhanced_image",
       label: `Upscaled image ${index + 1}`,
       metadata: {
-        enhancementBriefOutputId: briefOutput.id,
-        enhancementModel: brief.model,
-        enhancementProvider: brief.provider,
+        directPrompt: true,
+        enhancementAgentEnabled: false,
         model: result.model,
+        outputHeight: result.finalHeight ?? null,
+        outputWidth: result.finalWidth ?? null,
+        promptSource: promptOverride ? "override" : "upscaling",
         provider: result.provider,
+        taskId: result.taskId ?? null,
         sourceStorageKey: image.storage_key,
+        targetResolution: "2K",
       },
       runId: context.run.id,
       step: "image_upscaler",
@@ -544,9 +770,15 @@ async function runImageUpscaler(context: TestingRunContext) {
         fileSizeBytes: result.outputImage.byteLength,
         kind: "enhanced_image",
         metadata: {
+          directPrompt: true,
+          enhancementAgentEnabled: false,
           generatedByStep: "image_upscaler",
           outputId: output.id,
+          outputHeight: result.finalHeight ?? null,
+          outputWidth: result.finalWidth ?? null,
           sourceStorageKey: image.storage_key,
+          targetResolution: "2K",
+          taskId: result.taskId ?? null,
         },
         runId: context.run.id,
         storageKey: output.storageKey,
@@ -555,7 +787,7 @@ async function runImageUpscaler(context: TestingRunContext) {
   }
 
   await writeTestingLog({
-    message: `Enhancement + Image Upscaler completed ${outputs.length} image(s).`,
+    message: `Nano Banana Pro Upscaler completed ${outputs.length} image(s).`,
     runId: context.run.id,
     status: "completed",
     step: "image_upscaler",
@@ -624,6 +856,8 @@ async function runVideoAgent(context: TestingRunContext) {
     step: "video_agent",
   });
 
+  context.config.videoAgentResult = result;
+
   return result;
 }
 
@@ -640,10 +874,6 @@ async function runMediaQc(context: TestingRunContext) {
     return [];
   }
 
-  const expectedDurationSeconds =
-    typeof context.config.expectedDurationSeconds === "number"
-      ? context.config.expectedDurationSeconds
-      : null;
   const results = [];
 
   await writeTestingLog({
@@ -656,7 +886,7 @@ async function runMediaQc(context: TestingRunContext) {
   for (const [index, clip] of clips.entries()) {
     const report = await runMediaQcOnVideoBytes({
       clipStorageKey: clip.storage_key,
-      expectedDurationSeconds,
+      expectedDurationSeconds: expectedDurationSecondsForClip(context, clip),
       videoBytes: await downloadAsset(clip),
     });
 
@@ -689,6 +919,602 @@ async function runMediaQc(context: TestingRunContext) {
   return results;
 }
 
+async function resolveKlingModes(
+  context: TestingRunContext,
+  images: TestingAsset[],
+) {
+  const requestedMode = normalizeKlingGenerationMode(context.config.klingMode);
+  const modes = new Map<string, KlingGenerationMode>();
+
+  if (requestedMode) {
+    for (const image of images) {
+      modes.set(image.id, requestedMode);
+    }
+
+    return modes;
+  }
+
+  const existingResult = context.config.videoAgentResult;
+
+  if (
+    isJsonObject(existingResult) &&
+    Array.isArray(existingResult.decisions)
+  ) {
+    for (const decision of existingResult.decisions) {
+      if (!isJsonObject(decision) || typeof decision.imageId !== "string") {
+        continue;
+      }
+
+      const mode = generationModeFromDecision(decision);
+
+      if (mode) {
+        modes.set(decision.imageId, mode);
+      }
+    }
+
+    if (images.every((image) => modes.has(image.id))) {
+      return modes;
+    }
+  }
+
+  const prompt = await loadPipelinePrompt("agent");
+  const result = await classifyImagesForKlingModes({
+    images: await Promise.all(
+      images.map(async (image, index) => ({
+        enhancedImage: await downloadAsset(image),
+        enhancedStorageKey: image.storage_key,
+        imageId: image.id,
+        orderIndex: index,
+        sourceMimeType: inferImageMimeType(
+          image.storage_key,
+          image.content_type,
+        ),
+      })),
+    ),
+    prompt,
+  });
+
+  context.config.videoAgentResult = result;
+  await uploadJsonResult({
+    label: "Kling auto mode decisions",
+    name: "kling-auto-mode-decisions",
+    runId: context.run.id,
+    step: "kling_video",
+    value: result as unknown as Json,
+  });
+  await writeTestingLog({
+    message: "Kling Video auto-selected generation modes with the Video Agent.",
+    metadata: {
+      model: result.model,
+      provider: result.provider,
+      summary: result.summary,
+    },
+    runId: context.run.id,
+    status: "completed",
+    step: "video_agent",
+  });
+
+  for (const decision of result.decisions) {
+    modes.set(decision.imageId, decision.selectedMode);
+  }
+
+  return modes;
+}
+
+async function pollKieKlingTask({
+  imageIndex,
+  runId,
+  taskId,
+}: {
+  imageIndex: number;
+  runId: string;
+  taskId: string;
+}) {
+  let lastState = "unknown";
+
+  for (let pollIndex = 1; pollIndex <= KLING_MAX_POLLS; pollIndex += 1) {
+    const record = await getKieTaskRecord(taskId);
+    lastState = record.state;
+
+    if (
+      pollIndex === 1 ||
+      pollIndex % 6 === 0 ||
+      record.state === "success" ||
+      record.state === "fail" ||
+      record.state === "failed"
+    ) {
+      await writeTestingLog({
+        message: `Kling clip ${imageIndex + 1} is ${record.state}.`,
+        metadata: {
+          creditsConsumed: record.creditsConsumed ?? null,
+          pollIndex,
+          progress: record.progress ?? null,
+          taskId,
+        },
+        runId,
+        status: "info",
+        step: "kling_video",
+      });
+    }
+
+    if (record.state === "success") {
+      return record;
+    }
+
+    if (record.state === "fail" || record.state === "failed") {
+      throw new Error(
+        `Kling task ${taskId} failed: ${
+          record.failMsg ?? record.failCode ?? "unknown error"
+        }`,
+      );
+    }
+
+    if (pollIndex < KLING_MAX_POLLS) {
+      await sleep(KLING_POLL_INTERVAL_MS);
+    }
+  }
+
+  throw new Error(
+    `Kling task ${taskId} timed out after ${
+      (KLING_MAX_POLLS * KLING_POLL_INTERVAL_MS) / 1000
+    } seconds. Last state: ${lastState}.`,
+  );
+}
+
+async function runKlingVideo(context: TestingRunContext) {
+  const images = assetsByKind(context.assets, "enhanced_image").length
+    ? assetsByKind(context.assets, "enhanced_image")
+    : assetsByKind(context.assets, "source_image");
+
+  if (!images.length) {
+    await writeTestingLog({
+      message:
+        "Kling Video skipped because no enhanced or source images were available.",
+      runId: context.run.id,
+      status: "skipped",
+      step: "kling_video",
+    });
+    return [];
+  }
+
+  const promptOverride =
+    typeof context.config.promptOverride === "string" &&
+    context.config.promptOverride.trim()
+      ? context.config.promptOverride.trim()
+      : null;
+  const prompts: Record<
+    KlingGenerationMode | "multi_shot_three_scene",
+    string
+  > = {
+    multi_shot: promptOverride ?? (await loadPipelinePrompt("multi-shot")),
+    multi_shot_three_scene:
+      promptOverride ?? (await loadPipelinePrompt("multi-shot-three-scene")),
+    single_shot: promptOverride ?? (await loadPipelinePrompt("single-shot")),
+  };
+  await resolveKlingModes(context, images);
+  const requestedKlingMode =
+    typeof context.config.klingMode === "string"
+      ? context.config.klingMode
+      : "auto";
+  const clipPlan = buildTestingKlingClipPlan({
+    context,
+    images,
+    requestedMode: normalizeKlingGenerationMode(requestedKlingMode),
+  });
+  const outputs: TestingAsset[] = [];
+
+  await writeTestingLog({
+    message: `Kling Video started for ${clipPlan.length} clip job(s).`,
+    metadata: {
+      durationSecondsByMode: KLING_DURATION_SECONDS_BY_MODE,
+      mode: KLING_TEST_CONFIG.mode,
+      plan: clipPlan.map((clip) => ({
+        clipId: clip.clipId,
+        duplicateIndex: clip.duplicateIndex,
+        generationMode: clip.generationMode,
+        imageId: clip.image.id,
+        multiShotVariant: clip.multiShotVariant,
+      })),
+      provider: AI_PROVIDERS.imageToVideo.primary,
+      requestedMode: requestedKlingMode,
+      sourceImageCount: images.length,
+    },
+    runId: context.run.id,
+    status: "started",
+    step: "kling_video",
+  });
+
+  for (const [index, clipJob] of clipPlan.entries()) {
+    const image = clipJob.image;
+    const generationMode = clipJob.generationMode;
+    const durationSeconds = KLING_DURATION_SECONDS_BY_MODE[generationMode];
+    const multiShotVariant = clipJob.multiShotVariant;
+    const prompt =
+      multiShotVariant === "three_scene"
+        ? prompts.multi_shot_three_scene
+        : prompts[generationMode];
+
+    const signedUrl = await createSignedAssetUrl(image);
+    const task = await runWithTransientProviderRetry({
+      label: `Kling task create ${clipJob.clipId}`,
+      operation: () =>
+        createKieKling30Task({
+          aspectRatio: KLING_TEST_CONFIG.aspectRatio,
+          durationSeconds,
+          imageUrls: [signedUrl],
+          mode: KLING_TEST_CONFIG.mode,
+          multiPrompt:
+            generationMode === "multi_shot" && multiShotVariant
+              ? buildArchitecturalKlingMultiPrompt(
+                  durationSeconds,
+                  multiShotVariant,
+                )
+              : undefined,
+          multiShots: generationMode === "multi_shot",
+          prompt,
+          sound: KLING_TEST_CONFIG.sound,
+        }),
+      runId: context.run.id,
+      step: "kling_video",
+    });
+
+    await writeTestingLog({
+      message: `Kling 3.0 task created for ${clipJob.clipId}.`,
+      metadata: {
+        clipId: clipJob.clipId,
+        duplicateIndex: clipJob.duplicateIndex,
+        durationSeconds,
+        generationMode,
+        model: "kling-3.0/video",
+        multiShotSceneCount:
+          multiShotVariant === null
+            ? null
+            : multiShotSceneCountForVariant(multiShotVariant),
+        multiShotVariant,
+        multiShots: generationMode === "multi_shot",
+        provider: task.provider,
+        sourceStorageKey: image.storage_key,
+        taskId: task.taskId,
+      },
+      runId: context.run.id,
+      status: "started",
+      step: "kling_video",
+    });
+
+    const record = await pollKieKlingTask({
+      imageIndex: index,
+      runId: context.run.id,
+      taskId: task.taskId,
+    });
+    const resultUrl = record.resultUrls[0];
+
+    if (!resultUrl) {
+      throw new Error(
+        `Kling task ${task.taskId} completed without a result URL.`,
+      );
+    }
+
+    const resultResponse = await fetch(resultUrl);
+
+    if (!resultResponse.ok) {
+      throw new Error(
+        `Failed to download Kling result (${resultResponse.status}): ${resultResponse.statusText}`,
+      );
+    }
+
+    const contentType = getVideoContentType(resultResponse);
+    const videoBytes = new Uint8Array(await resultResponse.arrayBuffer());
+    const extension = extensionForContentType(contentType);
+    const output = await uploadTestingOutput({
+      bucket: STORAGE_BUCKETS.generatedClips,
+      contentType,
+      fileName: `kling-${clipJob.clipId}.${extension}`,
+      kind: "video_clip",
+      label: `Kling ${clipJob.clipId}`,
+      metadata: {
+        clipId: clipJob.clipId,
+        creditsConsumed: record.creditsConsumed ?? null,
+        duplicateIndex: clipJob.duplicateIndex,
+        durationSeconds,
+        generationMode,
+        model: record.model ?? "kling-3.0/video",
+        multiShotSceneCount:
+          multiShotVariant === null
+            ? null
+            : multiShotSceneCountForVariant(multiShotVariant),
+        multiShotVariant,
+        resultUrls: record.resultUrls,
+        sourceStorageKey: image.storage_key,
+        taskId: task.taskId,
+      },
+      runId: context.run.id,
+      step: "kling_video",
+      value: videoBytes,
+    });
+    const asset = await insertAssetFromOutput({
+      bucket: STORAGE_BUCKETS.generatedClips,
+      contentType,
+      fileName: `kling-${clipJob.clipId}.${extension}`,
+      fileSizeBytes: videoBytes.byteLength,
+      kind: "video_clip",
+      metadata: {
+        clipId: clipJob.clipId,
+        creditsConsumed: record.creditsConsumed ?? null,
+        duplicateIndex: clipJob.duplicateIndex,
+        durationSeconds,
+        generatedByStep: "kling_video",
+        generationMode,
+        multiShotSceneCount:
+          multiShotVariant === null
+            ? null
+            : multiShotSceneCountForVariant(multiShotVariant),
+        multiShotVariant,
+        outputId: output.id,
+        sourceStorageKey: image.storage_key,
+        taskId: task.taskId,
+      },
+      runId: context.run.id,
+      storageKey: output.storageKey,
+    });
+
+    outputs.push(asset);
+    await writeTestingLog({
+      message: `Kling ${clipJob.clipId} generated and stored.`,
+      metadata: {
+        clipId: clipJob.clipId,
+        contentType,
+        fileSizeBytes: videoBytes.byteLength,
+        generationMode,
+        storageKey: output.storageKey,
+        taskId: task.taskId,
+      },
+      runId: context.run.id,
+      status: "completed",
+      step: "kling_video",
+    });
+  }
+
+  context.assets.push(...outputs);
+  await writeTestingLog({
+    message: `Kling Video completed ${outputs.length} clip(s).`,
+    runId: context.run.id,
+    status: "completed",
+    step: "kling_video",
+  });
+
+  return outputs;
+}
+
+interface TestingMusicContext {
+  durationSeconds: number | null;
+  genre: string | null;
+  instructionsMd: string | null;
+  lengthProfile: VideoLengthProfile;
+  name: string | null;
+  planJson: Json | null;
+  signedUrl: string | null;
+  storageKey: string | null;
+  trackGroupKey: string | null;
+}
+
+function resolveTestingLengthProfile(
+  context: TestingRunContext,
+): VideoLengthProfile {
+  if (
+    context.config.lengthProfile === "short" ||
+    context.config.lengthProfile === "long"
+  ) {
+    return context.config.lengthProfile;
+  }
+
+  const sourceImageCount = assetsByKind(context.assets, "source_image").length;
+
+  return sourceImageCount >= 2 && sourceImageCount <= 3 ? "short" : "long";
+}
+
+function configuredMusicGenre(context: TestingRunContext) {
+  return typeof context.config.musicGenre === "string" &&
+    context.config.musicGenre.trim()
+    ? context.config.musicGenre.trim()
+    : "cinematic_ambient";
+}
+
+function configuredMusicId(context: TestingRunContext) {
+  return typeof context.config.musicId === "string" &&
+    context.config.musicId.trim()
+    ? context.config.musicId.trim()
+    : null;
+}
+
+async function loadMusicContext(
+  context: TestingRunContext,
+): Promise<TestingMusicContext> {
+  const lengthProfile = resolveTestingLengthProfile(context);
+  const fallbackGenre = configuredMusicGenre(context);
+  const emptyContext = (genre: string | null = fallbackGenre) => ({
+    durationSeconds: null,
+    genre,
+    instructionsMd: null,
+    lengthProfile,
+    name: null,
+    planJson: null,
+    signedUrl: null,
+    storageKey: null,
+    trackGroupKey: null,
+  });
+
+  if (fallbackGenre === "no_music") {
+    return emptyContext("no_music");
+  }
+
+  const musicAsset = assetsByKind(context.assets, "music_audio")[0] ?? null;
+
+  if (musicAsset) {
+    const metadata = isJsonObject(musicAsset.metadata)
+      ? musicAsset.metadata
+      : {};
+
+    return {
+      durationSeconds:
+        typeof metadata.durationSeconds === "number"
+          ? metadata.durationSeconds
+          : null,
+      genre: fallbackGenre,
+      instructionsMd:
+        typeof metadata.instructionsMd === "string"
+          ? metadata.instructionsMd
+          : null,
+      lengthProfile,
+      name: musicAsset.file_name,
+      planJson: isJsonObject(metadata.planJson) ? metadata.planJson : null,
+      signedUrl: await createSignedAssetUrl(musicAsset),
+      storageKey: musicAsset.storage_key,
+      trackGroupKey:
+        typeof metadata.trackGroupKey === "string"
+          ? metadata.trackGroupKey
+          : null,
+    };
+  }
+
+  const musicId = configuredMusicId(context);
+  const admin = createAdminClient();
+  type MusicTrackRow = {
+    duration_seconds: number | null;
+    file_storage_key: string | null;
+    genre: string | null;
+    instructions_md?: string | null;
+    length_profile?: string | null;
+    name: string | null;
+    plan_json?: Json | null;
+    track_group_key?: string | null;
+  };
+  const toMusicContext = async (
+    track: MusicTrackRow | null,
+  ): Promise<TestingMusicContext> => {
+    if (!track?.file_storage_key) {
+      return emptyContext(track?.genre ?? fallbackGenre);
+    }
+
+    return {
+      durationSeconds: track.duration_seconds ?? null,
+      genre: track.genre ?? fallbackGenre,
+      instructionsMd: track.instructions_md ?? null,
+      lengthProfile:
+        track.length_profile === "short" || track.length_profile === "long"
+          ? track.length_profile
+          : lengthProfile,
+      name: track.name ?? null,
+      planJson: track.plan_json ?? null,
+      signedUrl: await createSignedStorageUrl(
+        STORAGE_BUCKETS.musicTracks,
+        track.file_storage_key,
+      ),
+      storageKey: track.file_storage_key,
+      trackGroupKey: track.track_group_key ?? null,
+    };
+  };
+
+  const findMusicTrack = async (
+    selectColumns: string,
+    includeLengthProfile: boolean,
+  ) => {
+    const findGenreTrack = async (genre: string | null) => {
+      if (!genre) {
+        return null;
+      }
+
+      let query = admin
+        .from("music_tracks")
+        .select(selectColumns)
+        .eq("is_active", true)
+        .eq("genre", genre);
+
+      if (includeLengthProfile) {
+        query = query.eq("length_profile", lengthProfile);
+      }
+
+      const { data, error } = await query
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (error) {
+        throw error;
+      }
+
+      return data as MusicTrackRow | null;
+    };
+
+    if (!musicId) {
+      return findGenreTrack(fallbackGenre);
+    }
+
+    const { data: selectedTrack, error: selectedError } = await admin
+      .from("music_tracks")
+      .select(selectColumns)
+      .eq("is_active", true)
+      .eq("id", musicId)
+      .limit(1)
+      .maybeSingle();
+
+    if (selectedError) {
+      throw selectedError;
+    }
+
+    const selected = selectedTrack as MusicTrackRow | null;
+
+    if (
+      !includeLengthProfile ||
+      !selected ||
+      selected.length_profile === lengthProfile
+    ) {
+      return selected;
+    }
+
+    if (selected.track_group_key) {
+      const { data: siblingTrack, error: siblingError } = await admin
+        .from("music_tracks")
+        .select(selectColumns)
+        .eq("is_active", true)
+        .eq("track_group_key", selected.track_group_key)
+        .eq("length_profile", lengthProfile)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (siblingError) {
+        throw siblingError;
+      }
+
+      if (siblingTrack) {
+        return siblingTrack as unknown as MusicTrackRow;
+      }
+    }
+
+    return (await findGenreTrack(selected.genre ?? fallbackGenre)) ?? selected;
+  };
+
+  try {
+    return toMusicContext(
+      await findMusicTrack(
+        "duration_seconds, file_storage_key, genre, instructions_md, length_profile, name, plan_json, track_group_key",
+        true,
+      ),
+    );
+  } catch (error) {
+    if (!(isJsonObject(error) && error.code === "42703")) {
+      throw error;
+    }
+
+    return toMusicContext(
+      await findMusicTrack(
+        "duration_seconds, file_storage_key, genre, instructions_md, name, plan_json",
+        false,
+      ),
+    );
+  }
+}
+
 async function buildEditorContext(context: TestingRunContext) {
   const clips = assetsByKind(context.assets, "video_clip");
 
@@ -701,35 +1527,44 @@ async function buildEditorContext(context: TestingRunContext) {
       clip,
       report: await runMediaQcOnVideoBytes({
         clipStorageKey: clip.storage_key,
-        expectedDurationSeconds:
-          typeof context.config.expectedDurationSeconds === "number"
-            ? context.config.expectedDurationSeconds
-            : null,
+        expectedDurationSeconds: expectedDurationSecondsForClip(context, clip),
         videoBytes: await downloadAsset(clip),
       }),
     })),
   );
   const segments = buildClipSegmentsFromSources(
-    qcReports.map(({ clip, report }, index) => ({
-      clipStorageKey: clip.storage_key,
-      durationSeconds: report.metrics.durationSeconds,
-      imageId: clip.id,
-      orderIndex: index,
-      promptType: null,
-      sceneChangeSeconds: report.metrics.sceneChangeSeconds,
-    })),
+    qcReports.map(({ clip, report }, index) => {
+      const metadata = isJsonObject(clip.metadata) ? clip.metadata : {};
+      const multiShotVariant = multiShotVariantFromAsset(clip);
+      const multiShotSceneCount =
+        typeof metadata.multiShotSceneCount === "number"
+          ? metadata.multiShotSceneCount
+          : multiShotVariant
+            ? multiShotSceneCountForVariant(multiShotVariant)
+            : null;
+
+      return {
+        clipStorageKey: clip.storage_key,
+        durationSeconds: report.metrics.durationSeconds,
+        imageId: clip.id,
+        multiShotSceneCount,
+        multiShotVariant,
+        orderIndex: index,
+        promptType: metadata.generationMode === "multi_shot" ? "multi_shot" : null,
+        sceneChangeSeconds: report.metrics.sceneChangeSeconds,
+        tagSegmentsAsMultiShot: shouldTagSegmentsAsMultiShot(multiShotVariant),
+      };
+    }),
   );
+  const musicContext = await loadMusicContext(context);
+  const lengthProfile = musicContext.lengthProfile;
   const project = {
     customerName:
       typeof context.config.customerName === "string" &&
       context.config.customerName.trim()
         ? context.config.customerName.trim()
         : context.run.name,
-    musicGenre:
-      typeof context.config.musicGenre === "string" &&
-      context.config.musicGenre.trim()
-        ? context.config.musicGenre.trim()
-        : "cinematic_ambient",
+    musicGenre: musicContext.genre ?? configuredMusicGenre(context),
     projectId: context.run.id,
     salesNotes:
       typeof context.config.notes === "string" ? context.config.notes : null,
@@ -744,17 +1579,21 @@ async function buildEditorContext(context: TestingRunContext) {
     segments,
   });
   const voiceoverPlan = buildVoiceoverPlan({
+    lengthProfile,
     project,
     storyPlan,
   });
   const musicPlan = buildMusicInstructionPlan({
+    lengthProfile,
     musicGenre: project.musicGenre,
-    trackDurationSeconds: null,
-    trackName: null,
-    trackPlanJson: null,
-    trackStorageKey: null,
+    trackDurationSeconds: musicContext.durationSeconds,
+    trackInstructionsMd: musicContext.instructionsMd,
+    trackName: musicContext.name,
+    trackPlanJson: musicContext.planJson,
+    trackStorageKey: musicContext.storageKey,
   });
   const finalEditPlan = buildFinalEditPlan({
+    lengthProfile,
     music: musicPlan,
     segments,
     voiceover: voiceoverPlan,
@@ -825,28 +1664,6 @@ async function runEditorAgent(context: TestingRunContext) {
   });
 
   return editorContext;
-}
-
-async function loadMusicContext(context: TestingRunContext) {
-  const musicAssets = assetsByKind(context.assets, "music_audio");
-  const musicAsset = musicAssets[0] ?? null;
-
-  if (musicAsset) {
-    const admin = createAdminClient();
-    const { data } = await admin.storage
-      .from(musicAsset.bucket)
-      .createSignedUrl(musicAsset.storage_key, 60 * 60);
-
-    return {
-      signedUrl: data?.signedUrl ?? null,
-      storageKey: musicAsset.storage_key,
-    };
-  }
-
-  return {
-    signedUrl: null,
-    storageKey: null,
-  };
 }
 
 async function runVoiceMusic(context: TestingRunContext) {
@@ -1065,20 +1882,12 @@ async function runRemotionRender(context: TestingRunContext) {
   return output;
 }
 
-async function runUnsupportedCallbackStep(context: TestingRunContext) {
-  await writeTestingLog({
-    message:
-      "Kling test execution is registered but not enabled in isolated testing yet. Use the project pipeline retry tools until the KIE callback adapter is extracted.",
-    runId: context.run.id,
-    status: "skipped",
-    step: "kling_video",
-  });
-}
-
 async function executeTestingStep(
   stepName: TestStep,
   context: TestingRunContext,
 ) {
+  await refreshTestingAssets(context);
+
   if (stepName === "image_upscaler") {
     await runImageUpscaler(context);
     return;
@@ -1090,7 +1899,7 @@ async function executeTestingStep(
   }
 
   if (stepName === "kling_video") {
-    await runUnsupportedCallbackStep(context);
+    await runKlingVideo(context);
     return;
   }
 
@@ -1136,18 +1945,6 @@ export const testingRunExecutor = inngest.createFunction(
         throw runError;
       }
 
-      const { data: assets, error: assetsError } = await admin
-        .from("testing_run_assets")
-        .select(
-          "id, kind, bucket, storage_key, file_name, content_type, file_size_bytes, metadata",
-        )
-        .eq("run_id", runId)
-        .order("created_at", { ascending: true });
-
-      if (assetsError) {
-        throw assetsError;
-      }
-
       await admin
         .from("testing_runs")
         .update({
@@ -1158,7 +1955,7 @@ export const testingRunExecutor = inngest.createFunction(
         .eq("id", runId);
 
       return {
-        assets: (assets ?? []) as TestingAsset[],
+        assets: await loadTestingRunAssets(runId),
         config: isJsonObject(run.config) ? run.config : {},
         run,
       } satisfies TestingRunContext;

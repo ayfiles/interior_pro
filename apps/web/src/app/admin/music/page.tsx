@@ -61,7 +61,7 @@ export default async function AdminMusicPage({
 
       <section className="rounded-lg border border-[var(--line)] bg-[rgba(20,17,14,0.86)] p-4">
         <form action={upsertAdminMusicTrack} className="grid gap-4">
-          <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_150px_minmax(0,1fr)_auto] xl:items-end">
+          <div className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_180px_130px_150px_minmax(0,1fr)_auto] xl:items-end">
             <label className="grid gap-2">
               <span className="text-sm text-[var(--muted)]">Track name</span>
               <input
@@ -77,6 +77,17 @@ export default async function AdminMusicPage({
                 name="genre"
                 placeholder="soft_electronic"
               />
+            </label>
+            <label className="grid gap-2">
+              <span className="text-sm text-[var(--muted)]">Version</span>
+              <select
+                className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 text-sm outline-none focus:border-[var(--brass)]"
+                defaultValue="long"
+                name="lengthProfile"
+              >
+                <option value="long">Long</option>
+                <option value="short">Short</option>
+              </select>
             </label>
             <label className="grid gap-2">
               <span className="text-sm text-[var(--muted)]">Duration sec</span>
@@ -104,6 +115,14 @@ export default async function AdminMusicPage({
               Add
             </button>
           </div>
+          <label className="grid gap-2">
+            <span className="text-sm text-[var(--muted)]">Song group key</span>
+            <input
+              className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 text-sm outline-none focus:border-[var(--brass)]"
+              name="trackGroupKey"
+              placeholder="midnight-room-pulse"
+            />
+          </label>
           <div className="grid gap-3 lg:grid-cols-2">
             <label className="grid gap-2">
               <span className="text-sm text-[var(--muted)]">
@@ -148,11 +167,12 @@ export default async function AdminMusicPage({
         </div>
         {tracks.length ? (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[1040px] text-left text-sm">
+            <table className="w-full min-w-[1120px] text-left text-sm">
               <thead className="text-xs uppercase text-[var(--muted)]">
                 <tr className="border-b border-[var(--line)]">
                   <th className="px-4 py-3 font-medium">Track</th>
                   <th className="px-4 py-3 font-medium">Genre</th>
+                  <th className="px-4 py-3 font-medium">Version</th>
                   <th className="px-4 py-3 font-medium">Duration</th>
                   <th className="px-4 py-3 font-medium">Plan</th>
                   <th className="px-4 py-3 font-medium">Status</th>
@@ -180,6 +200,14 @@ export default async function AdminMusicPage({
                       ) : null}
                     </td>
                     <td className="px-4 py-3">{track.genre ?? "n/a"}</td>
+                    <td className="px-4 py-3">
+                      <StatusBadge status={track.lengthProfile} />
+                      {track.trackGroupKey ? (
+                        <p className="mt-2 font-mono text-xs text-[var(--muted)]">
+                          {track.trackGroupKey}
+                        </p>
+                      ) : null}
+                    </td>
                     <td className="px-4 py-3 font-mono">
                       {track.durationSeconds}s
                     </td>

@@ -20,6 +20,7 @@ const defaultManifest: SalesPitchRenderManifest = {
   fps: SALES_PITCH_FPS,
   generatedAt: new Date(0).toISOString(),
   height: SALES_PITCH_HEIGHT,
+  lengthProfile: "long",
   logo: {
     position: "intro_then_corner",
     url: null,

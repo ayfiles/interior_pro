@@ -41,6 +41,26 @@ function getResponseResultUrls(response: Json) {
   return extractKieResultUrls(response);
 }
 
+function numberFromRequest(request: Json, key: string) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    return null;
+  }
+
+  const value = (request as Record<string, Json>)[key];
+
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stringFromRequest(request: Json, key: string) {
+  if (!request || typeof request !== "object" || Array.isArray(request)) {
+    return null;
+  }
+
+  const value = (request as Record<string, Json>)[key];
+
+  return typeof value === "string" ? value : null;
+}
+
 async function writePipelineLog({
   message,
   metadata,
@@ -360,6 +380,7 @@ export const kieCallbackProcessor = inngest.createFunction(
         await writePipelineLog({
           message: `KIE callback stored Kling clip ${context.image.order_index + 1}.`,
           metadata: {
+            clipId: stringFromRequest(context.providerJob.request, "clipId"),
             clipStorageKey,
             contentType,
             creditsConsumed: taskRecord.creditsConsumed,
@@ -398,62 +419,47 @@ export const kieCallbackProcessor = inngest.createFunction(
       const supabase = createAdminClient();
       const { data: expectedJobs, error: expectedJobsError } = await supabase
         .from("provider_jobs")
-        .select("project_image_id")
+        .select("id, output_storage_key, request, status")
         .eq("project_id", context.providerJob.project_id)
-        .eq("step", "video_generation")
-        .not("project_image_id", "is", null);
+        .eq("step", "video_generation");
 
       if (expectedJobsError) {
         throw expectedJobsError;
       }
 
-      const expectedImageIds = Array.from(
-        new Set(
-          (expectedJobs ?? [])
-            .map((job) => job.project_image_id)
-            .filter((imageId): imageId is string => Boolean(imageId)),
-        ),
-      );
-      const fallbackImageIds = context.providerJob.project_image_id
-        ? [context.providerJob.project_image_id]
-        : [];
-      const expectedClipImageIds = expectedImageIds.length
-        ? expectedImageIds
-        : fallbackImageIds;
-
-      const { data: images, error: imagesError } = expectedClipImageIds.length
-        ? await supabase
-            .from("project_images")
-            .select("id, video_storage_key, video_status")
-            .in("id", expectedClipImageIds)
-        : { data: [], error: null };
-
-      if (imagesError) {
-        throw imagesError;
-      }
-
-      const imageRows = (images ?? []) as Array<{
+      const jobRows = (expectedJobs ?? []) as Array<{
         id: string;
-        video_storage_key: string | null;
-        video_status: string;
+        output_storage_key: string | null;
+        request: Json;
+        status: string;
       }>;
-      const readyImages = imageRows.filter(
-        (image) =>
-          Boolean(image.video_storage_key) &&
-          ["clip_generated", "qc_passed"].includes(image.video_status) &&
-          !image.video_storage_key?.endsWith(".json"),
+      const expectedClipCount = Math.max(
+        jobRows.length,
+        ...jobRows.map((job) => numberFromRequest(job.request, "expectedClipCount") ?? 0),
+        numberFromRequest(context.providerJob.request, "expectedClipCount") ?? 0,
       );
-      const pendingImages = imageRows.filter(
-        (image) => !readyImages.some((readyImage) => readyImage.id === image.id),
+      const readyJobs = jobRows.filter(
+        (job) =>
+          job.status === "completed" &&
+          Boolean(job.output_storage_key) &&
+          !job.output_storage_key?.endsWith(".json"),
+      );
+      const pendingJobs = jobRows.filter(
+        (job) => !readyJobs.some((readyJob) => readyJob.id === job.id),
+      );
+      const pendingClipCount = Math.max(
+        expectedClipCount - readyJobs.length,
+        pendingJobs.length,
       );
 
-      if (pendingImages.length > 0) {
+      if (pendingClipCount > 0) {
         await writePipelineLog({
-          message: `KIE callback stored clip ${context.image.order_index + 1}; waiting for ${pendingImages.length} remaining clip${pendingImages.length === 1 ? "" : "s"}.`,
+          message: `KIE callback stored clip ${context.image.order_index + 1}; waiting for ${pendingClipCount} remaining clip${pendingClipCount === 1 ? "" : "s"}.`,
           metadata: {
-            pendingImageIds: pendingImages.map((image) => image.id),
-            readyClipCount: readyImages.length,
-            totalClipCount: imageRows.length,
+            expectedClipCount,
+            pendingJobIds: pendingJobs.map((job) => job.id),
+            readyClipCount: readyJobs.length,
+            totalClipCount: expectedClipCount,
           },
           projectId: context.providerJob.project_id,
           status: "started",
@@ -462,9 +468,9 @@ export const kieCallbackProcessor = inngest.createFunction(
 
         return {
           ready: false,
-          readyClipCount: readyImages.length,
+          readyClipCount: readyJobs.length,
           shouldResumePipeline: false,
-          totalClipCount: imageRows.length,
+          totalClipCount: expectedClipCount,
         };
       }
 
@@ -489,8 +495,8 @@ export const kieCallbackProcessor = inngest.createFunction(
           message:
             "All KIE callback clips are stored; media QC resume was already claimed.",
           metadata: {
-            readyClipCount: readyImages.length,
-            totalClipCount: imageRows.length,
+            readyClipCount: readyJobs.length,
+            totalClipCount: expectedClipCount,
           },
           projectId: context.providerJob.project_id,
           status: "skipped",
@@ -499,17 +505,17 @@ export const kieCallbackProcessor = inngest.createFunction(
 
         return {
           ready: true,
-          readyClipCount: readyImages.length,
+          readyClipCount: readyJobs.length,
           shouldResumePipeline: false,
-          totalClipCount: imageRows.length,
+          totalClipCount: expectedClipCount,
         };
       }
 
       await writePipelineLog({
         message: "All KIE callback clips are stored. Project is ready for media QC.",
         metadata: {
-          readyClipCount: readyImages.length,
-          totalClipCount: imageRows.length,
+          readyClipCount: readyJobs.length,
+          totalClipCount: expectedClipCount,
         },
         projectId: context.providerJob.project_id,
         status: "completed",
@@ -518,9 +524,9 @@ export const kieCallbackProcessor = inngest.createFunction(
 
       return {
         ready: true,
-        readyClipCount: readyImages.length,
+        readyClipCount: readyJobs.length,
         shouldResumePipeline: true,
-        totalClipCount: imageRows.length,
+        totalClipCount: expectedClipCount,
       };
     });
 

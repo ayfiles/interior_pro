@@ -10,6 +10,7 @@ import {
   type SalesPitchRenderManifest,
   type SourceClipForPlanning,
   type TransitionKind,
+  type VideoLengthProfile,
   type VoiceoverPlan,
 } from "./types";
 
@@ -35,6 +36,25 @@ const TARGET_VOICEOVER_SECONDS = 25;
 const MIN_FINAL_DURATION_SECONDS = 30;
 const MAX_FINAL_DURATION_SECONDS = 45;
 const MIN_DETECTED_SEGMENT_SECONDS = 1;
+const VIDEO_LENGTH_PROFILE_TARGETS: Record<
+  VideoLengthProfile,
+  {
+    maxFinalDurationSeconds: number;
+    minFinalDurationSeconds: number;
+    targetVoiceoverSeconds: number;
+  }
+> = {
+  long: {
+    maxFinalDurationSeconds: MAX_FINAL_DURATION_SECONDS,
+    minFinalDurationSeconds: MIN_FINAL_DURATION_SECONDS,
+    targetVoiceoverSeconds: TARGET_VOICEOVER_SECONDS,
+  },
+  short: {
+    maxFinalDurationSeconds: 24,
+    minFinalDurationSeconds: 18,
+    targetVoiceoverSeconds: 14,
+  },
+};
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -81,6 +101,26 @@ function normalizeSceneChangeSeconds(
     (change, index) =>
       (normalized[index + 1] ?? sourceDurationSeconds) - change >=
       MIN_DETECTED_SEGMENT_SECONDS,
+  );
+}
+
+function configuredMultiShotBoundaries(source: SourceClipForPlanning) {
+  const sceneCount =
+    typeof source.multiShotSceneCount === "number" &&
+    Number.isInteger(source.multiShotSceneCount) &&
+    source.multiShotSceneCount > 1
+      ? source.multiShotSceneCount
+      : null;
+
+  if (!sceneCount || source.promptType !== "multi_shot") {
+    return null;
+  }
+
+  const sourceDurationSeconds = normalizeDuration(source.durationSeconds);
+  const segmentLength = sourceDurationSeconds / sceneCount;
+
+  return Array.from({ length: sceneCount - 1 }, (_, index) =>
+    roundSeconds(segmentLength * (index + 1)),
   );
 }
 
@@ -145,8 +185,10 @@ function normalizeFadeSeconds(value: unknown) {
 
 function splitSourceClip(source: SourceClipForPlanning): ClipSegment[] {
   const sourceDurationSeconds = normalizeDuration(source.durationSeconds);
+  const clipId = source.clipId ?? source.clipStorageKey;
+  const configuredSceneChanges = configuredMultiShotBoundaries(source);
   const sceneChangeSeconds = normalizeSceneChangeSeconds(
-    source.sceneChangeSeconds,
+    configuredSceneChanges ?? source.sceneChangeSeconds,
     sourceDurationSeconds,
   );
   const segmentBoundaries = [
@@ -159,18 +201,26 @@ function splitSourceClip(source: SourceClipForPlanning): ClipSegment[] {
   return Array.from({ length: segmentCount }, (_, index) => {
     const startSeconds = roundSeconds(segmentBoundaries[index]);
     const endSeconds = roundSeconds(segmentBoundaries[index + 1]);
+    const isTaggedMultiShot = Boolean(source.tagSegmentsAsMultiShot);
 
     return {
+      clipId,
       clipStorageKey: source.clipStorageKey,
       durationSeconds: Math.max(1, roundSeconds(endSeconds - startSeconds)),
       endSeconds,
-      id: `${source.imageId}:segment:${index + 1}`,
+      id: `${clipId}:segment:${index + 1}`,
       imageId: source.imageId,
       label:
-        segmentCount === 1
+        isTaggedMultiShot
+          ? `Multi-shot ${source.orderIndex + 1}.${index + 1}`
+          : segmentCount === 1
           ? `Shot ${source.orderIndex + 1}`
           : `Shot ${source.orderIndex + 1}.${index + 1}`,
+      isTaggedMultiShot,
+      multiShotSceneCount: source.multiShotSceneCount ?? null,
+      multiShotVariant: source.multiShotVariant ?? null,
       orderIndex: source.orderIndex,
+      promptType: source.promptType,
       sourceDurationSeconds,
       startSeconds,
     };
@@ -224,9 +274,11 @@ export function buildEditorStoryPlan({
 }
 
 export function buildVoiceoverPlan({
+  lengthProfile = "long",
   project,
   storyPlan,
 }: {
+  lengthProfile?: VideoLengthProfile;
   project: ProjectPlanningInput;
   storyPlan: EditorStoryPlan;
 }): VoiceoverPlan {
@@ -234,25 +286,36 @@ export function buildVoiceoverPlan({
   const detailSentence = salesNote
     ? `Die Auswahl greift ${salesNote} auf und macht daraus eine ruhige, hochwertige Wohnsituation.`
     : "Die Auswahl verbindet klare Linien, warme Materialien und eine ruhige, hochwertige Wohnsituation.";
-  const script = [
-    `${project.customerName} zeigt, wie aus einem Raum ein persoenlicher Lieblingsort wird.`,
-    detailSentence,
-    "Jede Perspektive lenkt den Blick auf Proportion, Oberflaeche und Atmosphaere.",
-    "So entsteht ein Interior-Konzept, das sofort verstaendlich ist und lange im Kopf bleibt.",
-    "Gerne beraten wir Sie persoenlich zur passenden Umsetzung.",
-  ].join(" ");
+  const script =
+    lengthProfile === "short"
+      ? [
+          `${project.customerName} zeigt eine kompakte, hochwertige Interior-Idee.`,
+          detailSentence,
+          "Jede Perspektive setzt Raumwirkung, Material und Atmosphaere klar in Szene.",
+          "Gerne beraten wir Sie persoenlich zur passenden Umsetzung.",
+        ].join(" ")
+      : [
+          `${project.customerName} zeigt, wie aus einem Raum ein persoenlicher Lieblingsort wird.`,
+          detailSentence,
+          "Jede Perspektive lenkt den Blick auf Proportion, Oberflaeche und Atmosphaere.",
+          "So entsteht ein Interior-Konzept, das sofort verstaendlich ist und lange im Kopf bleibt.",
+          "Gerne beraten wir Sie persoenlich zur passenden Umsetzung.",
+        ].join(" ");
 
   return {
     language: "de",
+    lengthProfile,
     provider: "elevenlabs",
     script,
-    targetDurationSeconds: TARGET_VOICEOVER_SECONDS,
+    targetDurationSeconds:
+      VIDEO_LENGTH_PROFILE_TARGETS[lengthProfile].targetVoiceoverSeconds,
     voiceSelection: project.voiceSelection,
     wordCount: script.split(/\s+/).filter(Boolean).length,
   };
 }
 
 export function buildMusicInstructionPlan({
+  lengthProfile = "long",
   musicGenre,
   trackInstructionsMd,
   trackDurationSeconds,
@@ -260,6 +323,7 @@ export function buildMusicInstructionPlan({
   trackPlanJson,
   trackStorageKey,
 }: {
+  lengthProfile?: VideoLengthProfile;
   musicGenre: string;
   trackInstructionsMd?: string | null;
   trackDurationSeconds?: number | null;
@@ -267,10 +331,13 @@ export function buildMusicInstructionPlan({
   trackPlanJson?: unknown | null;
   trackStorageKey?: string | null;
 }): MusicInstructionPlan {
-  const defaultCutPoints = [
-    0, 2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 33, 36,
-    39, 42, 45,
-  ];
+  const defaultCutPoints =
+    lengthProfile === "short"
+      ? [0, 2.5, 5, 7.5, 10, 12.5, 15, 18, 21, 24]
+      : [
+          0, 2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 33,
+          36, 39, 42, 45,
+        ];
   const genreInstructions: Record<string, string> = {
     cinematic_ambient:
       "Ruhige Schnitte auf weiche Akzente. Keine harten Cuts direkt vor dem Voiceover-Einstieg.",
@@ -302,6 +369,10 @@ export function buildMusicInstructionPlan({
   const songInstructions = trackInstructionsMd?.trim()
     ? `Song-specific instructions:\n${trackInstructionsMd.trim()}`
     : null;
+  const profileInstructions =
+    lengthProfile === "short"
+      ? "Short version: build a compact 18-24 second edit using the short song version and avoid late hard cuts."
+      : "Long version: build the full 30-45 second edit using the long song version.";
 
   return {
     bpmEstimate: normalizePlanNumber(trackPlan?.bpmEstimate),
@@ -313,12 +384,14 @@ export function buildMusicInstructionPlan({
     fadeSeconds: normalizeFadeSeconds(trackPlan?.fadeSeconds),
     genre: musicGenre,
     instructions: [
+      profileInstructions,
       genreInstructions[musicGenre] ?? genreInstructions.cinematic_ambient,
       planInstructions,
       songInstructions,
     ]
       .filter(Boolean)
       .join("\n\n"),
+    lengthProfile,
     minHardCutSpacingSeconds: normalizePlanNumber(
       trackPlan?.minHardCutSpacingSeconds ??
         trackRules?.minHardCutSpacingSeconds,
@@ -334,11 +407,13 @@ export function buildMusicInstructionPlan({
 }
 
 export function buildFinalEditPlan({
+  lengthProfile,
   music,
   segments,
   voiceover,
   voiceoverDurationSeconds,
 }: {
+  lengthProfile?: VideoLengthProfile;
   music: MusicInstructionPlan;
   segments: ClipSegment[];
   voiceover: VoiceoverPlan;
@@ -348,13 +423,15 @@ export function buildFinalEditPlan({
     throw new Error("Cannot build an edit plan without clip segments.");
   }
 
+  const resolvedLengthProfile = lengthProfile ?? music.lengthProfile;
+  const durationTargets = VIDEO_LENGTH_PROFILE_TARGETS[resolvedLengthProfile];
   const durationSeconds = clamp(
     Math.max(
-      MIN_FINAL_DURATION_SECONDS,
+      durationTargets.minFinalDurationSeconds,
       (voiceoverDurationSeconds ?? voiceover.targetDurationSeconds) + 4,
     ),
-    MIN_FINAL_DURATION_SECONDS,
-    MAX_FINAL_DURATION_SECONDS,
+    durationTargets.minFinalDurationSeconds,
+    durationTargets.maxFinalDurationSeconds,
   );
   const latestHardCutSecond =
     music.doNotHardCutAfterSeconds ?? Number.POSITIVE_INFINITY;
@@ -402,7 +479,10 @@ export function buildFinalEditPlan({
     scenes.push({
       clipStorageKey: segment.clipStorageKey,
       durationSeconds: duration,
+      isTaggedMultiShot: segment.isTaggedMultiShot,
       label: segment.label,
+      multiShotVariant: segment.multiShotVariant,
+      promptType: segment.promptType,
       segmentId: segment.id,
       startAtSeconds,
       transition,
@@ -414,6 +494,7 @@ export function buildFinalEditPlan({
   return {
     durationSeconds,
     generatedAt: new Date().toISOString(),
+    lengthProfile: resolvedLengthProfile,
     music,
     scenes,
     voiceover,
@@ -439,7 +520,10 @@ export function buildSalesPitchRenderManifest({
     return {
       assetUrl,
       durationSeconds: scene.durationSeconds,
+      isTaggedMultiShot: scene.isTaggedMultiShot,
       label: scene.label,
+      multiShotVariant: scene.multiShotVariant,
+      promptType: scene.promptType,
       startAtSeconds: scene.startAtSeconds,
       transition: scene.transition,
       trimEndSeconds: scene.trimEndSeconds,
@@ -459,6 +543,7 @@ export function buildSalesPitchRenderManifest({
     fps: SALES_PITCH_FPS,
     generatedAt: new Date().toISOString(),
     height: SALES_PITCH_HEIGHT,
+    lengthProfile: editPlan.lengthProfile,
     logo: {
       position: "intro_then_corner",
       url: logoSignedUrl ?? null,

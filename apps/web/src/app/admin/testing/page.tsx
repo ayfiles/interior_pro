@@ -17,8 +17,8 @@ import {
 const TEST_STEPS = [
   {
     description:
-      "Builds the preservation brief and creates the upscaled image.",
-    label: "Enhancement + Image Upscaler",
+      "Runs Nano Banana Pro directly and creates a 2K enhanced image.",
+    label: "Nano Banana Pro Upscaler",
     value: "image_upscaler",
   },
   {
@@ -27,7 +27,7 @@ const TEST_STEPS = [
     value: "video_agent",
   },
   {
-    description: "Reserved for the KIE/Kling callback adapter.",
+    description: "Creates Kling 3.0 clips through KIE and stores them for QC.",
     label: "Kling Video",
     value: "kling_video",
   },
@@ -182,7 +182,7 @@ export default async function AdminTestingPage({
             </label>
           </div>
 
-          <div className="grid gap-3 lg:grid-cols-3">
+          <div className="grid gap-3 lg:grid-cols-4">
             <label className="grid gap-2">
               <span className="text-sm text-[var(--muted)]">Voice</span>
               <input
@@ -193,25 +193,36 @@ export default async function AdminTestingPage({
             </label>
             <label className="grid gap-2">
               <span className="text-sm text-[var(--muted)]">
-                Expected clip duration
+                Expected QC duration
               </span>
               <input
                 className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 text-sm outline-none focus:border-[var(--brass)]"
                 min="1"
                 name="expectedDurationSeconds"
-                placeholder="4"
+                placeholder="Auto for Kling"
                 step="0.1"
                 type="number"
               />
             </label>
             <label className="grid gap-2">
+              <span className="text-sm text-[var(--muted)]">Kling mode</span>
+              <select
+                className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 text-sm outline-none focus:border-[var(--brass)]"
+                name="klingMode"
+              >
+                <option value="auto">Auto via Video Agent</option>
+                <option value="single_shot">Single shot</option>
+                <option value="multi_shot">Multi shot</option>
+              </select>
+            </label>
+            <label className="grid gap-2">
               <span className="text-sm text-[var(--muted)]">
-                Prompt override
+                Nano Banana prompt override
               </span>
               <input
                 className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 text-sm outline-none focus:border-[var(--brass)]"
                 name="promptOverride"
-                placeholder="Optional for agent tests"
+                placeholder="Optional direct Nano Banana prompt"
               />
             </label>
           </div>

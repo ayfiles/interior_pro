@@ -50,6 +50,13 @@ const SEEDED_PROMPTS = [
     title: "Kling Multi-Shot",
   },
   {
+    description:
+      "Alternate Kling multi-shot prompt for the second multi-shot image with three slower scene beats.",
+    filePath: "src/inngest/prompts/multi-shot-three-scene.md",
+    slug: "multi-shot-three-scene",
+    title: "Kling Multi-Shot Three-Scene",
+  },
+  {
     description: "Guides edit rhythm, ducking, and cut behavior for music genres.",
     filePath: "src/inngest/prompts/music.md",
     slug: "music",

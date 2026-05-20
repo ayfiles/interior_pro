@@ -1,7 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { getVideoImageRequirements } from "@interior-pro/shared";
+import { AI_PROVIDERS, getVideoImageRequirements } from "@interior-pro/shared";
 import {
   inngest,
   PROJECT_SUBMITTED_EVENT,
@@ -141,7 +141,7 @@ export async function createProjectFromUploadedAssets(
   const { error: logError } = await supabase.from("pipeline_logs").insert({
     message: `${input.imageStorageKeys.length} source images uploaded`,
     metadata: {
-      imageEnhancement: "nano-banana-pro",
+      imageEnhancement: AI_PROVIDERS.imageEnhancement.primary,
       imageToVideo: "kling-3.0",
       musicGenre,
       voiceSelection,

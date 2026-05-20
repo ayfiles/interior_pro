@@ -295,8 +295,10 @@ interface Database {
           genre?: string | null;
           instructions_md?: string | null;
           is_active?: boolean;
+          length_profile?: "short" | "long";
           name: string;
           plan_json?: Json | null;
+          track_group_key?: string | null;
         };
         Row: {
           created_at: string;
@@ -306,8 +308,10 @@ interface Database {
           id: string;
           instructions_md: string | null;
           is_active: boolean;
+          length_profile: "short" | "long";
           name: string;
           plan_json: Json | null;
+          track_group_key: string | null;
         };
         Update: {
           duration_seconds?: number;
@@ -315,8 +319,10 @@ interface Database {
           genre?: string | null;
           instructions_md?: string | null;
           is_active?: boolean;
+          length_profile?: "short" | "long";
           name?: string;
           plan_json?: Json | null;
+          track_group_key?: string | null;
         };
         Relationships: [];
       };

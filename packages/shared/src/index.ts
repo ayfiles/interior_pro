@@ -1,10 +1,45 @@
 export const VIDEO_REQUIREMENTS = {
-  minImages: 5,
+  minImages: 2,
   maxImages: 8,
   targetResolution: "1920x1080",
-  minDurationSeconds: 30,
+  minDurationSeconds: 18,
   maxDurationSeconds: 45,
 } as const;
+
+export const VIDEO_LENGTH_PROFILES = {
+  long: {
+    maxImages: 8,
+    minImages: 4,
+    targetDurationSeconds: 36,
+  },
+  short: {
+    maxImages: 3,
+    minImages: 2,
+    targetDurationSeconds: 20,
+  },
+} as const;
+
+export type VideoLengthProfile = keyof typeof VIDEO_LENGTH_PROFILES;
+
+export function getVideoLengthProfileForImageCount(imageCount: number) {
+  if (
+    imageCount >= VIDEO_LENGTH_PROFILES.short.minImages &&
+    imageCount <= VIDEO_LENGTH_PROFILES.short.maxImages
+  ) {
+    return "short" satisfies VideoLengthProfile;
+  }
+
+  if (
+    imageCount >= VIDEO_LENGTH_PROFILES.long.minImages &&
+    imageCount <= VIDEO_LENGTH_PROFILES.long.maxImages
+  ) {
+    return "long" satisfies VideoLengthProfile;
+  }
+
+  throw new Error(
+    `Unsupported image count ${imageCount}. Expected ${VIDEO_REQUIREMENTS.minImages}-${VIDEO_REQUIREMENTS.maxImages} images.`,
+  );
+}
 
 export function getVideoImageRequirements(env = process.env) {
   const requestedMinImages = Number(env.NEXT_PUBLIC_TEST_MIN_IMAGES);
@@ -28,9 +63,9 @@ export type VideoImageRequirements = ReturnType<
 
 export const AI_PROVIDERS = {
   imageEnhancement: {
-    primary: "nano-banana-pro",
-    model: "gemini-3-pro-image-preview",
-    fallback: ["magnific", "replicate-real-esrgan"],
+    primary: "kie-nano-banana-pro",
+    model: "nano-banana-pro",
+    fallback: ["kie-gpt-image-2", "magnific", "replicate-real-esrgan"],
   },
   imageToVideo: {
     primary: "kling-3.0",

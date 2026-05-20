@@ -15,7 +15,7 @@ import {
   Upload,
   XCircle,
 } from "lucide-react";
-import type { VideoImageRequirements } from "@interior-pro/shared";
+import { AI_PROVIDERS, type VideoImageRequirements } from "@interior-pro/shared";
 import { projectStoragePrefix, STORAGE_BUCKETS } from "@interior-pro/supabase";
 import { enqueueProjectPipeline } from "@/app/actions/projects";
 import { createClient } from "@/lib/supabase/client";
@@ -356,7 +356,7 @@ export function NewProjectForm({
       const { error: logError } = await supabase.from("pipeline_logs").insert({
         message: `${uploadedKeys.length} source images uploaded`,
         metadata: {
-          imageEnhancement: "nano-banana-pro",
+          imageEnhancement: AI_PROVIDERS.imageEnhancement.primary,
           imageToVideo: "kling-3.0",
           musicGenre: selectedMusicGenre,
           musicId: musicId || null,

@@ -68,6 +68,18 @@ const TEST_RUN_STEPS = new Set([
   "full_pipeline",
 ]);
 const TEST_RUN_MODES = new Set(["only_step", "from_step"]);
+const TEST_RUN_KLING_MODES = new Set(["auto", "single_shot", "multi_shot"]);
+const AUDIO_CONTENT_TYPES_BY_EXTENSION: Record<string, string> = {
+  aac: "audio/aac",
+  flac: "audio/flac",
+  m4a: "audio/mp4",
+  mp3: "audio/mpeg",
+  mpeg: "audio/mpeg",
+  mpga: "audio/mpeg",
+  oga: "audio/ogg",
+  ogg: "audio/ogg",
+  wav: "audio/wav",
+};
 const TEST_RUN_UPLOAD_FIELDS: Array<{
   bucket: (typeof STORAGE_BUCKETS)[keyof typeof STORAGE_BUCKETS];
   field: string;
@@ -207,6 +219,36 @@ function formFiles(formData: FormData, field: string) {
   return formData
     .getAll(field)
     .filter((value): value is File => value instanceof File && value.size > 0);
+}
+
+function fileExtension(fileName: string) {
+  return fileName.split(".").pop()?.toLowerCase() ?? "";
+}
+
+function audioContentTypeForFile(file: File) {
+  const inferred = AUDIO_CONTENT_TYPES_BY_EXTENSION[fileExtension(file.name)];
+
+  if (inferred) {
+    return inferred;
+  }
+
+  if (file.type.startsWith("audio/")) {
+    return file.type;
+  }
+
+  throw new Error("Upload a supported audio file, for example MP3, WAV, M4A, OGG, AAC, or FLAC.");
+}
+
+function contentTypeForAdminUpload(file: File, kind: string) {
+  if (kind === "music_audio" || kind === "voiceover_audio") {
+    return audioContentTypeForFile(file);
+  }
+
+  return file.type || "application/octet-stream";
+}
+
+async function uploadBodyForFile(file: File, contentType: string) {
+  return new Blob([await file.arrayBuffer()], { type: contentType });
 }
 
 function buildInngestDispatchFailureMessage(errorMessage: string) {
@@ -442,6 +484,7 @@ export async function createAdminTestingRun(formData: FormData) {
     "expectedDurationSeconds",
   );
   const promptOverride = optionalFormText(formData, "promptOverride");
+  const klingMode = optionalFormText(formData, "klingMode") ?? "auto";
   const runId = crypto.randomUUID();
 
   if (!TEST_RUN_STEPS.has(targetStep)) {
@@ -450,6 +493,10 @@ export async function createAdminTestingRun(formData: FormData) {
 
   if (!TEST_RUN_MODES.has(runMode)) {
     throw new Error("Invalid testing run mode.");
+  }
+
+  if (!TEST_RUN_KLING_MODES.has(klingMode)) {
+    throw new Error("Invalid Kling mode.");
   }
 
   if (musicId && !UUID_PATTERN.test(musicId)) {
@@ -471,6 +518,7 @@ export async function createAdminTestingRun(formData: FormData) {
   const config = {
     customerName,
     expectedDurationSeconds,
+    klingMode,
     musicGenre,
     musicId,
     notes,
@@ -486,7 +534,7 @@ export async function createAdminTestingRun(formData: FormData) {
       inputSummary[upload.kind] = files.map((file) => ({
         name: file.name,
         size: file.size,
-        type: file.type || null,
+        type: contentTypeForAdminUpload(file, upload.kind),
       }));
     }
   }
@@ -511,14 +559,15 @@ export async function createAdminTestingRun(formData: FormData) {
       const files = formFiles(formData, upload.field);
 
       for (const [index, file] of files.entries()) {
+        const contentType = contentTypeForAdminUpload(file, upload.kind);
         const storageKey = `testing/${runId}/inputs/${upload.kind}/${safeStorageName(
           file.name,
           index,
         )}`;
         const { error: uploadError } = await admin.storage
           .from(upload.bucket)
-          .upload(storageKey, file, {
-            contentType: file.type || "application/octet-stream",
+          .upload(storageKey, await uploadBodyForFile(file, contentType), {
+            contentType,
             upsert: false,
           });
 
@@ -530,7 +579,7 @@ export async function createAdminTestingRun(formData: FormData) {
           .from("testing_run_assets")
           .insert({
             bucket: upload.bucket,
-            content_type: file.type || null,
+            content_type: contentType,
             file_name: file.name,
             file_size_bytes: file.size,
             kind: upload.kind,
@@ -1188,6 +1237,8 @@ export async function upsertAdminMusicTrack(formData: FormData) {
   const actor = await requirePlatformAdmin();
   const name = requireFormText(formData, "name");
   const genre = optionalFormText(formData, "genre");
+  const lengthProfile = requireFormText(formData, "lengthProfile");
+  const trackGroupKey = optionalFormText(formData, "trackGroupKey");
   const durationSeconds = Number(requireFormText(formData, "durationSeconds"));
   const existingStorageKey = optionalFormText(formData, "storageKey");
   const planJson = validateMusicPlanJson(
@@ -1204,11 +1255,16 @@ export async function upsertAdminMusicTrack(formData: FormData) {
     throw new Error("Invalid track duration.");
   }
 
+  if (lengthProfile !== "short" && lengthProfile !== "long") {
+    throw new Error("Invalid music length profile.");
+  }
+
   const admin = createAdminClient();
   let fileStorageKey = existingStorageKey;
 
   if (file instanceof File && file.size > 0) {
-    const extension = file.name.split(".").pop()?.toLowerCase() || "mp3";
+    const extension = fileExtension(file.name) || "mp3";
+    const contentType = audioContentTypeForFile(file);
     fileStorageKey = `admin/${Date.now()}-${
       file.name
         .toLowerCase()
@@ -1217,8 +1273,8 @@ export async function upsertAdminMusicTrack(formData: FormData) {
     }`;
     const { error: uploadError } = await admin.storage
       .from(STORAGE_BUCKETS.musicTracks)
-      .upload(fileStorageKey, file, {
-        contentType: file.type || "audio/mpeg",
+      .upload(fileStorageKey, await uploadBodyForFile(file, contentType), {
+        contentType,
         upsert: false,
       });
 
@@ -1239,8 +1295,10 @@ export async function upsertAdminMusicTrack(formData: FormData) {
       genre,
       instructions_md: instructionsMd,
       is_active: true,
+      length_profile: lengthProfile,
       name,
       plan_json: planJson,
+      track_group_key: trackGroupKey,
     })
     .select("id")
     .single();
@@ -1258,7 +1316,9 @@ export async function upsertAdminMusicTrack(formData: FormData) {
       genre,
       hasInstructions: Boolean(instructionsMd),
       hasPlan: Boolean(planJson),
+      lengthProfile,
       name,
+      trackGroupKey,
     },
     resourceId: track.id,
     resourceType: "music_track",

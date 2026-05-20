@@ -215,8 +215,10 @@ export interface AdminMusicTrack {
   id: string;
   instructionsMd: string | null;
   isActive: boolean;
+  lengthProfile: "short" | "long";
   name: string;
   planJson: Json | null;
+  trackGroupKey: string | null;
 }
 
 export interface AdminProjectDetailImage {
@@ -1680,7 +1682,7 @@ export async function listAdminMusicTracks() {
   const { data, error } = await admin
     .from("music_tracks")
     .select(
-      "id, name, file_storage_key, duration_seconds, genre, instructions_md, plan_json, is_active, created_at",
+      "id, name, file_storage_key, duration_seconds, genre, length_profile, track_group_key, instructions_md, plan_json, is_active, created_at",
     )
     .order("created_at", { ascending: false });
 
@@ -1717,8 +1719,10 @@ export async function listAdminMusicTracks() {
         id: track.id,
         instructionsMd: null,
         isActive: track.is_active,
+        lengthProfile: "long",
         name: track.name,
         planJson: null,
+        trackGroupKey: null,
       }),
     );
   }
@@ -1731,8 +1735,10 @@ export async function listAdminMusicTracks() {
     id: string;
     instructions_md: string | null;
     is_active: boolean;
+    length_profile: "short" | "long";
     name: string;
     plan_json: Json | null;
+    track_group_key: string | null;
   }>).map(
     (track): AdminMusicTrack => ({
       createdAt: track.created_at,
@@ -1742,8 +1748,10 @@ export async function listAdminMusicTracks() {
       id: track.id,
       instructionsMd: track.instructions_md,
       isActive: track.is_active,
+      lengthProfile: track.length_profile,
       name: track.name,
       planJson: track.plan_json,
+      trackGroupKey: track.track_group_key,
     }),
   );
 }

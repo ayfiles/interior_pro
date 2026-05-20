@@ -13,8 +13,8 @@ export function formatDateTime(value: string | null | undefined) {
 
 export function statusLabel(status: string) {
   const labels: Record<string, string> = {
-    enhancement_agent: "Enhancement + Image Upscaler",
-    image_upscaler: "Enhancement + Image Upscaler",
+    enhancement_agent: "Nano Banana Pro Upscaler",
+    image_upscaler: "Nano Banana Pro Upscaler",
   };
 
   if (labels[status]) {

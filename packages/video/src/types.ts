@@ -5,24 +5,34 @@ export const SALES_PITCH_WIDTH = 1920;
 export const SALES_PITCH_HEIGHT = 1080;
 
 export type TransitionKind = "cut" | "crossfade" | "soft_zoom";
+export type VideoLengthProfile = "short" | "long";
 
 export interface SourceClipForPlanning {
+  clipId?: string | null;
   clipStorageKey: string;
   durationSeconds: number | null;
   imageId: string;
+  multiShotSceneCount?: number | null;
+  multiShotVariant?: string | null;
   orderIndex: number;
   promptType: string | null;
   sceneChangeSeconds?: number[] | null;
+  tagSegmentsAsMultiShot?: boolean | null;
 }
 
 export interface ClipSegment {
+  clipId: string;
   clipStorageKey: string;
   durationSeconds: number;
   endSeconds: number;
   id: string;
   imageId: string;
+  isTaggedMultiShot: boolean;
   label: string;
+  multiShotSceneCount: number | null;
+  multiShotVariant: string | null;
   orderIndex: number;
+  promptType: string | null;
   sourceDurationSeconds: number;
   startSeconds: number;
 }
@@ -41,6 +51,7 @@ export interface EditorStoryPlan {
 
 export interface VoiceoverPlan {
   language: "de";
+  lengthProfile: VideoLengthProfile;
   provider: "elevenlabs" | "placeholder";
   script: string;
   targetDurationSeconds: number;
@@ -64,6 +75,7 @@ export interface MusicInstructionPlan {
   } | null;
   genre: string;
   instructions: string;
+  lengthProfile: VideoLengthProfile;
   minHardCutSpacingSeconds: number | null;
   preferredHardCutSpacingSeconds: number[];
   secondaryAccentPointsSeconds: number[];
@@ -77,7 +89,10 @@ export interface MusicInstructionPlan {
 export interface FinalEditPlanScene {
   clipStorageKey: string;
   durationSeconds: number;
+  isTaggedMultiShot: boolean;
   label: string;
+  multiShotVariant: string | null;
+  promptType: string | null;
   segmentId: string;
   startAtSeconds: number;
   transition: TransitionKind;
@@ -88,6 +103,7 @@ export interface FinalEditPlanScene {
 export interface FinalEditPlan {
   durationSeconds: number;
   generatedAt: string;
+  lengthProfile: VideoLengthProfile;
   music: MusicInstructionPlan;
   scenes: FinalEditPlanScene[];
   voiceover: VoiceoverPlan;
@@ -96,7 +112,10 @@ export interface FinalEditPlan {
 export interface RenderScene {
   assetUrl: string;
   durationSeconds: number;
+  isTaggedMultiShot: boolean;
   label: string;
+  multiShotVariant: string | null;
+  promptType: string | null;
   startAtSeconds: number;
   transition: TransitionKind;
   trimEndSeconds: number;
@@ -115,6 +134,7 @@ export interface SalesPitchRenderManifest {
   fps: number;
   generatedAt: string;
   height: number;
+  lengthProfile: VideoLengthProfile;
   logo: {
     position: "intro_then_corner";
     url: string | null;

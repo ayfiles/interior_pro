@@ -1,23 +1,30 @@
 import { AI_PROVIDERS } from "@interior-pro/shared";
 import { Buffer } from "node:buffer";
+import sharp from "sharp";
 import { z } from "zod";
 
 export interface ImageEnhancementInput {
   aspectRatio: "16:9";
   prompt: string;
   sourceImage: Uint8Array;
+  sourceImageUrl?: string;
   sourceMimeType: string;
   sourceStorageKey?: string;
   targetResolution: "1K" | "2K" | "4K";
 }
 
 export interface ImageEnhancementResult {
-  model: typeof AI_PROVIDERS.imageEnhancement.model;
+  creditsConsumed?: number;
+  finalHeight?: number;
+  finalWidth?: number;
+  model: string;
+  originalOutputMimeType?: string;
   outputImage: Uint8Array;
   outputMimeType: string;
   outputStorageKey?: string;
-  provider: typeof AI_PROVIDERS.imageEnhancement.primary;
+  provider: string;
   responseText?: string;
+  taskId?: string;
 }
 
 const ConfidenceSchema = z.enum(["low", "medium", "high"]);
@@ -136,9 +143,43 @@ interface GeminiResponse {
   };
 }
 
+interface KieApiResponse<T> {
+  code: number;
+  data?: T;
+  msg?: string;
+  success?: boolean;
+}
+
+interface KieImageTask {
+  provider: "kie.ai";
+  taskId: string;
+}
+
+interface KieImageTaskRecord {
+  completeTime?: number;
+  costTime?: number;
+  createTime?: number;
+  creditsConsumed?: number;
+  failCode?: string;
+  failMsg?: string;
+  model?: string;
+  progress?: number;
+  resultJson?: string;
+  resultUrls: string[];
+  state: string;
+  taskId: string;
+  updateTime?: number;
+}
+
 const ENHANCEMENT_ANALYSIS_MODEL =
   process.env.GEMINI_IMAGE_ANALYSIS_MODEL ?? "gemini-2.5-pro";
 const VIDEO_AGENT_MODEL = process.env.GEMINI_VIDEO_AGENT_MODEL ?? "gemini-2.5-pro";
+const NANO_BANANA_PRO_MODEL =
+  process.env.GEMINI_IMAGE_ENHANCEMENT_MODEL ?? "gemini-3-pro-image-preview";
+const KIE_API_BASE_URL = process.env.KIE_API_BASE_URL ?? "https://api.kie.ai";
+const KIE_NANO_BANANA_PRO_MODEL = "nano-banana-pro";
+const KIE_IMAGE_POLL_INTERVAL_MS = 10_000;
+const KIE_IMAGE_MAX_POLLS = 90;
 const ENHANCEMENT_ANALYSIS_RESPONSE_SCHEMA = {
   properties: {
     colorLocks: {
@@ -254,6 +295,176 @@ function parseJsonResponse(text: string) {
   }
 
   return JSON.parse(withoutFence.slice(jsonStart, jsonEnd + 1)) as unknown;
+}
+
+function getKieApiKey() {
+  const apiKey = process.env.KIE_API_KEY;
+
+  if (!apiKey) {
+    throw new Error("KIE_API_KEY is required for KIE image enhancement.");
+  }
+
+  return apiKey;
+}
+
+async function readKieJson<T>(response: Response) {
+  const body = (await response.json()) as KieApiResponse<T>;
+  const successfulBody =
+    body.code === 200 || body.success === true || body.msg === "success";
+
+  if (!response.ok || !successfulBody || !body.data) {
+    throw new Error(
+      `KIE API request failed (${response.status}): ${body.msg ?? response.statusText}`,
+    );
+  }
+
+  return body.data;
+}
+
+function parseKieResultUrls(resultJson?: string) {
+  if (!resultJson) {
+    return [];
+  }
+
+  const parsed = JSON.parse(resultJson) as {
+    resultUrl?: string;
+    resultUrls?: string[];
+    result_url?: string;
+    result_urls?: string[];
+    url?: string;
+    urls?: string[];
+  };
+
+  return [
+    ...(parsed.resultUrls ?? []),
+    ...(parsed.result_urls ?? []),
+    parsed.resultUrl,
+    parsed.result_url,
+    parsed.url,
+    ...(parsed.urls ?? []),
+  ].filter((url): url is string => Boolean(url));
+}
+
+function getImageContentType(response: Response) {
+  const contentType = response.headers.get("content-type")?.split(";")[0];
+
+  if (contentType?.startsWith("image/")) {
+    return contentType;
+  }
+
+  return "image/png";
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function createKieNanoBananaProImageTask({
+  aspectRatio,
+  imageUrl,
+  prompt,
+  resolution,
+}: {
+  aspectRatio: ImageEnhancementInput["aspectRatio"];
+  imageUrl: string;
+  prompt: string;
+  resolution: "1K" | "2K" | "4K";
+}): Promise<KieImageTask> {
+  const response = await fetch(`${KIE_API_BASE_URL}/api/v1/jobs/createTask`, {
+    body: JSON.stringify({
+      input: {
+        aspect_ratio: aspectRatio,
+        image_input: [imageUrl],
+        output_format: "png",
+        prompt,
+        resolution,
+      },
+      model: KIE_NANO_BANANA_PRO_MODEL,
+    }),
+    headers: {
+      Authorization: `Bearer ${getKieApiKey()}`,
+      "Content-Type": "application/json",
+    },
+    method: "POST",
+  });
+  const data = await readKieJson<{ taskId: string }>(response);
+
+  return {
+    provider: "kie.ai",
+    taskId: data.taskId,
+  };
+}
+
+async function getKieImageTaskRecord(
+  taskId: string,
+): Promise<KieImageTaskRecord> {
+  const response = await fetch(
+    `${KIE_API_BASE_URL}/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(
+      taskId,
+    )}`,
+    {
+      headers: {
+        Authorization: `Bearer ${getKieApiKey()}`,
+      },
+      method: "GET",
+    },
+  );
+  const data = await readKieJson<
+    Omit<KieImageTaskRecord, "resultUrls"> & {
+      resultJson?: string;
+      resultUrl?: string;
+      resultUrls?: string[];
+      result_url?: string;
+      result_urls?: string[];
+      url?: string;
+      urls?: string[];
+    }
+  >(response);
+  const resultUrls = [
+    ...(data.resultUrls ?? []),
+    ...(data.result_urls ?? []),
+    ...parseKieResultUrls(data.resultJson),
+    data.resultUrl,
+    data.result_url,
+    data.url,
+    ...(data.urls ?? []),
+  ].filter((url): url is string => Boolean(url));
+
+  return {
+    ...data,
+    resultUrls,
+  };
+}
+
+async function pollKieImageTask(taskId: string) {
+  let lastState = "unknown";
+
+  for (let pollIndex = 1; pollIndex <= KIE_IMAGE_MAX_POLLS; pollIndex += 1) {
+    const record = await getKieImageTaskRecord(taskId);
+    lastState = record.state;
+
+    if (record.state === "success") {
+      return record;
+    }
+
+    if (record.state === "fail" || record.state === "failed") {
+      throw new Error(
+        `KIE image task ${taskId} failed: ${
+          record.failMsg ?? record.failCode ?? "unknown error"
+        }`,
+      );
+    }
+
+    if (pollIndex < KIE_IMAGE_MAX_POLLS) {
+      await sleep(KIE_IMAGE_POLL_INTERVAL_MS);
+    }
+  }
+
+  throw new Error(
+    `KIE image task ${taskId} timed out after ${
+      (KIE_IMAGE_MAX_POLLS * KIE_IMAGE_POLL_INTERVAL_MS) / 1000
+    } seconds. Last state: ${lastState}.`,
+  );
 }
 
 function cleanBriefText(value: string, maxLength = 260) {
@@ -561,7 +772,7 @@ export async function enhanceImageWithNanoBananaPro(
   }
 
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${AI_PROVIDERS.imageEnhancement.model}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${NANO_BANANA_PRO_MODEL}:generateContent`,
     {
       body: JSON.stringify({
         contents: [
@@ -615,11 +826,73 @@ export async function enhanceImageWithNanoBananaPro(
   }
 
   return {
-    model: AI_PROVIDERS.imageEnhancement.model,
+    model: NANO_BANANA_PRO_MODEL,
     outputImage: Buffer.from(inlineData.data, "base64"),
     outputMimeType: inlineData.mimeType ?? inlineData.mime_type ?? "image/png",
     outputStorageKey: input.sourceStorageKey?.replace("/source/", "/enhanced/"),
-    provider: AI_PROVIDERS.imageEnhancement.primary,
+    provider: "nano-banana-pro",
     responseText: textPart?.text,
+  };
+}
+
+export async function enhanceImageWithKieNanoBananaPro(
+  input: ImageEnhancementInput,
+): Promise<ImageEnhancementResult> {
+  if (!input.sourceImageUrl) {
+    throw new Error(
+      "sourceImageUrl is required for KIE Nano Banana Pro enhancement.",
+    );
+  }
+
+  const task = await createKieNanoBananaProImageTask({
+    aspectRatio: input.aspectRatio,
+    imageUrl: input.sourceImageUrl,
+    prompt: [
+      input.prompt,
+      "",
+      "OUTPUT REQUIREMENT: generate a 2K PNG image for premium architectural image-to-video use. Preserve the exact room, object identity, local colors, materials, geometry, switched-on light states, and visible layout while allowing the requested cinematic photographic finish.",
+    ].join("\n"),
+    resolution: input.targetResolution,
+  });
+  const record = await pollKieImageTask(task.taskId);
+  const resultUrl = record.resultUrls[0];
+
+  if (!resultUrl) {
+    throw new Error(
+      `Nano Banana Pro task ${task.taskId} completed without a result URL.`,
+    );
+  }
+
+  const resultResponse = await fetch(resultUrl);
+
+  if (!resultResponse.ok) {
+    throw new Error(
+      `Failed to download Nano Banana Pro result (${resultResponse.status}): ${resultResponse.statusText}`,
+    );
+  }
+
+  const originalOutputMimeType = getImageContentType(resultResponse);
+  const outputImage = new Uint8Array(await resultResponse.arrayBuffer());
+  const metadata = await sharp(outputImage).metadata();
+
+  return {
+    creditsConsumed: record.creditsConsumed,
+    finalHeight: metadata.height,
+    finalWidth: metadata.width,
+    model: KIE_NANO_BANANA_PRO_MODEL,
+    originalOutputMimeType,
+    outputImage,
+    outputMimeType: originalOutputMimeType,
+    outputStorageKey: input.sourceStorageKey?.replace("/source/", "/enhanced/"),
+    provider: AI_PROVIDERS.imageEnhancement.primary,
+    responseText: JSON.stringify({
+      creditsConsumed: record.creditsConsumed ?? null,
+      originalOutputMimeType,
+      resultUrls: record.resultUrls,
+      state: record.state,
+      taskId: task.taskId,
+      targetResolution: input.targetResolution,
+    }),
+    taskId: task.taskId,
   };
 }
