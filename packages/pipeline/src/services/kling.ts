@@ -193,17 +193,17 @@ export function buildArchitecturalKlingMultiPrompt(
       {
         duration: durations[0],
         prompt:
-          "Shot 1: premium calm establishing view from a new elegant angle. Preserve the exact interior, furniture, colors, lighting, switched-on lamps, and materials. Slow stabilized cinematic push with realistic daylight and warm practical glow.",
+          "Shot 1: premium calm establishing view from a new elegant angle. Preserve the exact interior, furniture, colors, lighting, switched-on lamps, and materials. Slow stabilized cinematic push with realistic daylight and warm practical glow. No bounce, no vertical bobbing, no jitter.",
       },
       {
         duration: durations[1],
         prompt:
-          "Shot 2: refined detail close-up on the strongest object or material zone. Show fabric, wood, stone, glass, metal, and light interaction with natural depth of field. No redesign, no object changes, no color drift.",
+          "Shot 2: refined detail close-up on the strongest object or material zone. Show fabric, wood, stone, glass, metal, and light interaction with natural depth of field. No redesign, no object changes, no color drift. Stable gimbal motion only.",
       },
       {
         duration: durations[2],
         prompt:
-          "Shot 3: final alternate architectural hero angle with premium campaign feeling. Smooth gimbal motion, soft atmospheric light, natural shadows, exact same room identity, realistic texture and proportion preservation.",
+          "Shot 3: final alternate architectural hero angle with premium campaign feeling. Smooth gimbal motion, soft atmospheric light, natural shadows, exact same room identity, realistic texture and proportion preservation. No bounce or wobble.",
       },
     ];
   }
@@ -211,31 +211,31 @@ export function buildArchitecturalKlingMultiPrompt(
   const durations = distributeShotDurations(durationSeconds, 5);
 
   return [
-    {
-      duration: durations[0],
-      prompt:
-        "Shot 1: premium wide establishing view of the full room from the provided image. Preserve exact layout, furniture, colors, lights, and materials. Slow stabilized push-in, warm daylight, realistic shadows, luxury architectural footage.",
-    },
-    {
-      duration: durations[1],
-      prompt:
-        "Shot 2: cinematic close-up on the hero object or seating area. Show textile fibers, cushions, wood or stone detail, and practical light reflections. Same objects and colors, no redesign, shallow natural depth of field.",
-    },
-    {
-      duration: durations[2],
-      prompt:
-        "Shot 3: switch to a different elegant room angle, like a side perspective or low gimbal move. Keep architecture and furniture identical. Smooth half-orbit motion, realistic lens response, cinematic premium interior showcase.",
-    },
-    {
-      duration: durations[3],
-      prompt:
-        "Shot 4: atmospheric material detail shot with daylight rays, dust particles, curtains, metal, glass, wood, and fabric reacting naturally to light. Preserve exact scene identity, color palette, and switched-on lights.",
-    },
-    {
-      duration: durations[4],
-      prompt:
-        "Shot 5: final hero perspective returning to a balanced architectural composition. Elegant slow motion, premium campaign feeling, warm natural contrast, no added objects, no color drift, photoreal real-location footage.",
-    },
+      {
+        duration: durations[0],
+        prompt:
+        "Shot 1: premium wide establishing view of the full room from the provided image. Preserve exact layout, furniture, colors, lights, and materials. Slow stabilized push-in, warm daylight, realistic shadows, luxury architectural footage. No bounce, no vertical bobbing, no jitter.",
+      },
+      {
+        duration: durations[1],
+        prompt:
+        "Shot 2: cinematic close-up on the hero object or seating area. Show textile fibers, cushions, wood or stone detail, and practical light reflections. Same objects and colors, no redesign, shallow natural depth of field. Stable gimbal motion only.",
+      },
+      {
+        duration: durations[2],
+        prompt:
+        "Shot 3: switch to a different elegant room angle, like a side perspective or low gimbal move. Keep architecture and furniture identical. Smooth half-orbit motion, realistic lens response, cinematic premium interior showcase. No bounce or wobble.",
+      },
+      {
+        duration: durations[3],
+        prompt:
+        "Shot 4: atmospheric material detail shot with daylight rays, dust particles, curtains, metal, glass, wood, and fabric reacting naturally to light. Preserve exact scene identity, color palette, and switched-on lights. Stable camera movement only.",
+      },
+      {
+        duration: durations[4],
+        prompt:
+        "Shot 5: final hero perspective returning to a balanced architectural composition. Elegant slow motion, premium campaign feeling, warm natural contrast, no added objects, no color drift, photoreal real-location footage. No bounce, no vertical bobbing.",
+      },
   ];
 }
 

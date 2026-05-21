@@ -1,58 +1,17 @@
-# Nano Banana Pro Upscaling Prompt
+First, observe the reference image carefully. Identify the exact color of every chair, sofa, rug, textile, wall surface, floor, cabinet, and decor object. Also identify the aspect ratio of the reference image and the direction of all visible sunlight. These observations are LOCKED for the output.
 
-Target output:
+Produce a color-accurate photographic version of this 3D interior rendering. Every object must keep its precise color identity — chair colors, fabric colors, wood tones, stone tones, wall colors all stay exactly as observed. Colors may only shift the way a real camera captures them under natural light: brighter in highlights, deeper in shadows, never into a different hue. A blue chair stays blue. A green chair stays green. A beige chair stays beige.
 
-- Resolution: 2K
-- Aspect ratio: 16:9
-- Use case: architectural interior image enhancement from a reference image
+Aspect ratio handling: the output must be 16:9. If the reference image is not already 16:9, do not extend or expand the image to add room space, walls, ceiling, or floor that is not visible in the reference. Instead, crop the reference to fit the 16:9 format by trimming the top and bottom edges as needed. Use only the visible content of the reference image, cropped where required. Never invent additional interior space.
 
-## Prompt
+Match the original lighting conditions: the room is brightly and evenly lit by daylight from the existing windows. Keep the same time of day, the same daylight intensity, and the same overall brightness as the reference. Preserve strong sunlight where it appears in the reference — visible sun rays through windows, warm sunlit surfaces, and atmospheric daylight are essential. Do not create a golden hour or sunset look unless the reference itself shows one. Do not darken the scene. Do not close or alter the curtains.
 
-Ultra-realistic 2K 16:9 architectural interior photograph, exact 1:1 geometry match to the reference image. High-end full-frame camera capture, magazine-quality editorial interior style with cinematic architectural campaign lighting. Preserve the original layout, camera angle, proportions, furniture placement, object positions, materials, finishes, wall colors, floor colors, fabric colors, wood tones, stone tones, cabinetry colors, decor colors, lighting setup, and TV position if present.
+Upgrade materials to true photorealism: real wood grain with visible pores and plank direction, real stone with natural mineral veining, fabrics with woven fiber depth and soft folds, metals with accurate reflections, glass with realistic Fresnel behavior. Matte stays matte, glossy stays glossy, brushed stays brushed.
 
-REFERENCE IMAGE IS ABSOLUTE:
-The reference image defines everything. Do not redesign, reinterpret, restyle, simplify, or invent anything. If there is any conflict, the reference image always has priority.
+Improve realism through subtle physical effects only: soft natural shadows under furniture, gentle ambient occlusion in corners and where objects meet the floor, accurate material reflections, warm glow from any practical lights that are on in the reference. Keep all wall lights, ceiling lights, and pendant lights in the same on/off state as shown. Apply soft filmic tonemapping with bright midtones, gentle highlight rolloff, and lifted shadows that retain detail.
 
-IMAGE-SPECIFIC PRESERVATION BRIEF:
-If an image-specific preservation brief is provided after this master prompt, treat it as a conservative factual checklist extracted from the reference image. Use it to lock concrete colors, light on/off states, visible materials, object states, geometry, and high-risk details for that specific image. The preservation brief does not allow redesign or invention. If the brief and the visible reference image conflict, the reference image has highest priority.
+The result should look like a bright, clean architectural photograph taken at the same time of day as the reference, with natural sunlight providing atmospheric depth.
 
-CRITICAL LOCAL COLOR LOCK:
-Preserve the identity and local hue family of every important surface and object. A blue rug must remain blue, a green chair must remain green, pale wood must remain pale wood, black metal must remain black metal, and a lit practical lamp must remain lit. Do not recolor furniture, textiles, walls, floors, cabinetry, stone, wood, metal, decor, screens, or fixtures into a different hue or material.
+Preserve camera angle, framing, furniture positions, room layout, and curtain positions exactly within the cropped 16:9 frame.
 
-Allowed: realistic photographic changes in brightness, shadow, highlight intensity, specular reflection, local exposure, daylight warmth/coolness, and natural bounce light caused by cinematic lighting. These may make a surface brighter, darker, glossier, warmer in highlights, or cooler in shadows only as a real camera would capture it. They must not change the underlying object color, material identity, or visible light on/off state.
-
-CINEMATIC MOOD THROUGH LIGHT:
-Create a clearly cinematic, atmospheric, elegant, luxurious mood using realistic brightness contrast, deeper shadow structure, controlled highlights, natural light falloff, ambient occlusion, contact shadows, warm practical-light glow, volumetric daylight, and material-accurate light behavior. The image should feel like a premium architectural campaign photograph, not a sterile render. The cinematic effect must come from physically plausible light direction, luminance, shadow depth, highlight placement, global illumination, reflection behavior, and subtle filmic tonemapping while preserving local color identity.
-
-LIGHTING:
-Preserve all existing light sources exactly as shown in the reference. If lamps, LED strips, ceiling spots, wall sconces, pendant lights, under-cabinet lights, or practical lights are switched on, they must remain switched on with the same position, brightness relationship, color temperature, glow behavior, and natural light spill. Do not turn off, remove, dim, add, or relocate any light fixture.
-
-Natural daylight must enter from the same direction as in the reference image, softly diffused and realistic. Strengthen the existing daylight into a more cinematic photographic setup when plausible: visible sun shafts, soft curtains glow, directional window highlights, gentle haze, layered falloff across the room, and natural bounce light. Add subtle visible light rays entering from outside through the existing windows or openings, strictly following the natural daylight direction already present in the reference image. The rays should be elegant, realistic, lightly volumetric, and strong enough to create premium atmosphere without washing out the room or changing object colors.
-
-The light rays must feel natural and physically plausible, as if sunlight is passing through the room's existing air and architectural openings. They should reveal depth, catch furniture edges, create controlled pools of light, add dimensionality to the space, and make practical lights feel warm and alive while preserving local material colors, white balance believability, and lighting relationships.
-
-CONTRAST AND SHADOW DEPTH:
-Add stronger natural contrast and deeper shadow depth than a neutral product render. Shadows should feel rich, cinematic, dimensional, and spatially layered, with clearer separation between lit and shaded areas. Preserve texture and detail inside shadow areas. Do not crush blacks, do not make the room too dark. The light composition should make the room look like an actual high-end interior photograph taken in the real room. No flat showroom render, no sterile CGI look.
-
-MATERIAL REALISM:
-Extreme material realism across every visible surface. Surfaces must show physically accurate texture, reflectance, roughness, micro-bumps, subtle imperfections, natural wear, and correct light interaction according to the material in the reference.
-
-Fabrics should show woven threads, fiber direction, seams, stitching, folds, compression marks, subtle pilling, soft texture, and realistic tactile depth. Rugs and carpets should show dense 3D fibers, uneven pile height, directional nap, tiny fiber shadows, natural variation, and visible thickness.
-
-FLOOR REALISM:
-The floor must look physically real, sharp, detailed, and material-specific while preserving the exact original floor color from the reference. If wood, show natural grain direction, pores, plank separation, bevels, knots, growth rings, sanding marks, subtle dents, micro-scratches, and matte or satin finish behavior according to the reference. If stone, tile, ceramic, porcelain, marble, concrete, or similar, show mineral structure, veining already present in the reference, fine pores, tile edges, grout lines, slight unevenness, micro-chipping where natural, and crisp surface texture. The floor must not look flat, blurry, plastic, painted, textureless, or recolored.
-
-STONE AND KITCHEN SURFACES:
-All stone surfaces must remain the exact original reference color while appearing ultra-realistic, sharp, premium, and physically believable. Show mineral particles, veining, crystalline depth, pores, speckles, subtle edge details, and surface roughness appropriate to the stone type. No smeared stone, no generic marble pattern, no new tones.
-
-Kitchen cabinetry, countertops, backsplash, islands, and appliance panels must match the reference material, color, and finish exactly. Detect whether surfaces are glossy, semi-gloss, satin, matte, brushed, lacquered, stone, metal, wood, ceramic, or glass, and render them accordingly. Glossy surfaces should show controlled realistic reflections and soft highlight rolloff without looking wet unless the reference is mirror-gloss. Matte surfaces should show diffuse light absorption, subtle fingerprints, tiny imperfections, edge softness, and minimal reflection. Brushed metal should show directional grain and anisotropic reflections.
-
-LIGHT AND REFLECTION BEHAVIOR:
-Light must react naturally to each material without shifting the color palette. Glossy, polished, glass, metal, and lacquered surfaces should show sharper reflections and brighter specular highlights using only colors and light sources present in the reference. Matte, fabric, plaster, raw wood, honed stone, and painted surfaces should scatter light softly with broad natural highlights. Ensure realistic Fresnel reflections, contact shadows, ambient occlusion, reflected window light, grazing highlights, and physically plausible bounce light.
-
-OVERALL RESULT:
-Ultra-realistic, elegant, cozy, cinematic premium interior campaign photograph with stronger-but-realistic contrast, deeper layered shadows, refined highlight placement, warm practical glow, visible daylight atmosphere, natural dimensionality, crisp floor structure, sharp stone detail, accurate kitchen surface finishes, tactile high-end materials, and physically believable light behavior while preserving the local identity of every original reference color and material.
-
-## Negative Prompt
-
-new object colors, changed object colors, invented colors, altered local hue identity, object recoloring, blue turning green, green turning beige, changed wall color identity, changed floor color identity, changed wood species or tone family, changed stone color identity, changed fabric color identity, aggressive color cast, orange cast that recolors objects, yellow tint that recolors objects, blue tint that recolors objects, green tint that recolors objects, oversaturation, muddy desaturation, new materials, redesigned room, changed geometry, changed camera angle, changed proportions, moved furniture, added furniture, removed furniture, changed decor, turned-off lights, removed lights, added lights, relocated lights, dimmed practical lights, sterile neutral render, flat lighting, no atmosphere, overly dark room, lost shadow detail, fake CGI look, plastic materials, waxy surfaces, wet-looking matte surfaces, overly smooth materials, blurry floor, textureless floor, fake wood grain, smeared stone texture, generic marble pattern, low-resolution stone, low-resolution textures, unrealistic reflections, distorted furniture, warped screen, blurry details, AI-generated artifacts.
+16:9, 4K, photorealistic.

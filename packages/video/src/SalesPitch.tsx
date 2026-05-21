@@ -1,7 +1,9 @@
-import { Audio, Video } from "@remotion/media";
+import { Audio } from "@remotion/media";
 import {
   AbsoluteFill,
+  Freeze,
   Img,
+  OffthreadVideo,
   Sequence,
   interpolate,
   useCurrentFrame,
@@ -47,12 +49,12 @@ function Scene({ scene }: { scene: RenderScene }) {
 
   return (
     <AbsoluteFill style={{ backgroundColor: "#0d0b08", overflow: "hidden" }}>
-      <Video
+      <OffthreadVideo
         muted
-        objectFit="cover"
         src={scene.assetUrl}
         style={{
           height: "100%",
+          objectFit: "cover",
           opacity: fadeIn * fadeOut,
           transform: `scale(${zoom})`,
           width: "100%",
@@ -73,6 +75,10 @@ function Scene({ scene }: { scene: RenderScene }) {
 function MusicTrack({ manifest }: { manifest: SalesPitchRenderManifest }) {
   const { fps } = useVideoConfig();
   const durationFrames = secondsToFrames(manifest.durationSeconds, fps);
+  const musicFadeOutFrames = Math.max(
+    1,
+    secondsToFrames(manifest.outro.musicFadeOutDurationSeconds, fps),
+  );
 
   if (!manifest.audio.musicUrl) {
     return null;
@@ -86,7 +92,7 @@ function MusicTrack({ manifest }: { manifest: SalesPitchRenderManifest }) {
       volume={(frame) => {
         const fade = interpolate(
           frame,
-          [0, fps, durationFrames - fps, durationFrames],
+          [0, fps, durationFrames - musicFadeOutFrames, durationFrames],
           [0, 1, 1, 0],
           { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
         );
@@ -98,7 +104,11 @@ function MusicTrack({ manifest }: { manifest: SalesPitchRenderManifest }) {
           voiceoverStart +
           secondsToFrames(manifest.audio.voiceoverDurationSeconds ?? 25, fps);
         const ducking =
-          frame >= voiceoverStart && frame <= voiceoverEnd ? 0.12 : 0.32;
+          manifest.audio.voiceoverUrl &&
+          frame >= voiceoverStart &&
+          frame <= voiceoverEnd
+            ? 0.12
+            : 0.32;
 
         return fade * ducking;
       }}
@@ -124,69 +134,18 @@ function VoiceoverTrack({
   );
 }
 
-function LogoOverlay({ manifest }: { manifest: SalesPitchRenderManifest }) {
+function SceneLayer({ manifest }: { manifest: SalesPitchRenderManifest }) {
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
-
-  if (!manifest.logo.url) {
-    return null;
-  }
-
-  const introOpacity = interpolate(frame, [0, fps / 2, fps * 2.6, fps * 3.4], [
-    0, 1, 1, 0,
-  ], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-  const cornerOpacity = interpolate(frame, [fps * 3, fps * 4], [0, 0.78], {
-    extrapolateLeft: "clamp",
-    extrapolateRight: "clamp",
-  });
-
-  return (
-    <>
-      <AbsoluteFill
-        style={{
-          alignItems: "center",
-          justifyContent: "center",
-          opacity: introOpacity,
-        }}
-      >
-        <Img
-          src={manifest.logo.url}
-          style={{
-            maxHeight: 160,
-            maxWidth: 420,
-            objectFit: "contain",
-          }}
-        />
-      </AbsoluteFill>
-      <div
-        style={{
-          bottom: 54,
-          left: 64,
-          opacity: cornerOpacity,
-          position: "absolute",
-        }}
-      >
-        <Img
-          src={manifest.logo.url}
-          style={{
-            maxHeight: 58,
-            maxWidth: 180,
-            objectFit: "contain",
-          }}
-        />
-      </div>
-    </>
-  );
-}
-
-function EndCard({ manifest }: { manifest: SalesPitchRenderManifest }) {
-  const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
-  const startFrame = secondsToFrames(manifest.durationSeconds - 3.2, fps);
-  const opacity = interpolate(frame, [startFrame, startFrame + fps], [0, 1], {
+  const outroStartFrame = secondsToFrames(manifest.outro.startAtSeconds, fps);
+  const blurEndFrame =
+    outroStartFrame + secondsToFrames(manifest.outro.blurDurationSeconds, fps);
+  const blurFrames = Math.max(1, blurEndFrame - outroStartFrame);
+  const lastScene = manifest.scenes.at(-1) ?? null;
+  const heldLastSceneFrame = lastScene
+    ? Math.max(0, secondsToFrames(lastScene.durationSeconds, fps) - 3)
+    : 0;
+  const blur = interpolate(frame, [outroStartFrame, blurEndFrame], [0, 26], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
@@ -194,53 +153,10 @@ function EndCard({ manifest }: { manifest: SalesPitchRenderManifest }) {
   return (
     <AbsoluteFill
       style={{
-        alignItems: "center",
-        background:
-          "linear-gradient(180deg, rgba(13,11,8,0), rgba(13,11,8,0.72) 38%, rgba(13,11,8,0.94))",
-        justifyContent: "flex-end",
-        opacity,
-        paddingBottom: 96,
+        filter: `blur(${blur}px)`,
+        transform: blur > 0 ? "scale(1.04)" : "scale(1)",
       }}
     >
-      <div
-        style={{
-          color: "#f4ebdc",
-          fontFamily:
-            'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-          fontSize: 42,
-          fontWeight: 500,
-          letterSpacing: 0,
-          textAlign: "center",
-        }}
-      >
-        {manifest.project.customerName}
-      </div>
-      <div
-        style={{
-          color: "#d6ad5f",
-          fontFamily:
-            'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-          fontSize: 24,
-          letterSpacing: 0,
-          marginTop: 12,
-          textAlign: "center",
-        }}
-      >
-        Interior Beratung mit praeziser Wirkung
-      </div>
-    </AbsoluteFill>
-  );
-}
-
-export function SalesPitch({
-  manifest,
-}: {
-  manifest: SalesPitchRenderManifest;
-}) {
-  const { fps } = useVideoConfig();
-
-  return (
-    <AbsoluteFill style={{ backgroundColor: "#0d0b08" }}>
       {manifest.scenes.map((scene, index) => (
         <Sequence
           durationInFrames={secondsToFrames(scene.durationSeconds, fps)}
@@ -251,10 +167,115 @@ export function SalesPitch({
           <Scene scene={scene} />
         </Sequence>
       ))}
-      <EndCard manifest={manifest} />
-      <LogoOverlay manifest={manifest} />
+      {lastScene ? (
+        <Sequence from={outroStartFrame} durationInFrames={blurFrames + 1}>
+          <Freeze frame={heldLastSceneFrame}>
+            <Scene scene={lastScene} />
+          </Freeze>
+        </Sequence>
+      ) : null}
+    </AbsoluteFill>
+  );
+}
+
+function OutroOverlay({ manifest }: { manifest: SalesPitchRenderManifest }) {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const startFrame = secondsToFrames(manifest.outro.startAtSeconds, fps);
+  const blurFrames = secondsToFrames(manifest.outro.blurDurationSeconds, fps);
+  const logoStartFrame =
+    startFrame + secondsToFrames(manifest.outro.logoDelaySeconds, fps);
+  const logoFadeFrames = secondsToFrames(
+    manifest.outro.logoFadeDurationSeconds,
+    fps,
+  );
+  const whiteOpacity = interpolate(
+    frame,
+    [startFrame, startFrame + blurFrames],
+    [0, 1],
+    { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+  );
+  const logoOpacity = manifest.logo.url
+    ? interpolate(
+        frame,
+        [logoStartFrame, logoStartFrame + logoFadeFrames],
+        [0, 1],
+        { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+      )
+    : 0;
+  const logoBlur = manifest.logo.url
+    ? interpolate(
+        frame,
+        [logoStartFrame, logoStartFrame + logoFadeFrames],
+        [18, 0],
+        { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
+      )
+    : 0;
+
+  return (
+    <AbsoluteFill
+      style={{
+        alignItems: "center",
+        backgroundColor: `rgba(255, 255, 255, ${whiteOpacity})`,
+        justifyContent: "center",
+        opacity: frame < startFrame ? 0 : 1,
+        pointerEvents: "none",
+      }}
+    >
+      {manifest.logo.url ? (
+        <Img
+          src={manifest.logo.url}
+          style={{
+            filter: `blur(${logoBlur}px)`,
+            maxHeight: 190,
+            maxWidth: 520,
+            objectFit: "contain",
+            opacity: logoOpacity,
+          }}
+        />
+      ) : null}
+    </AbsoluteFill>
+  );
+}
+
+function SceneBoundaryGuard({ manifest }: { manifest: SalesPitchRenderManifest }) {
+  if (manifest.scenes.length === 0) {
+    return (
+      <AbsoluteFill
+        style={{
+          backgroundColor: "#ffffff",
+        }}
+      />
+    );
+  }
+
+  return null;
+}
+
+function SalesPitchContent({
+  manifest,
+}: {
+  manifest: SalesPitchRenderManifest;
+}) {
+  return (
+    <>
+      <SceneLayer manifest={manifest} />
+      <SceneBoundaryGuard manifest={manifest} />
+      <OutroOverlay manifest={manifest} />
       <MusicTrack manifest={manifest} />
       <VoiceoverTrack manifest={manifest} />
+    </>
+  );
+}
+
+export function SalesPitch({
+  manifest,
+}: {
+  manifest: SalesPitchRenderManifest;
+}) {
+  return (
+    <AbsoluteFill style={{ backgroundColor: "#ffffff" }}>
+      <SalesPitchContent manifest={manifest} />
     </AbsoluteFill>
   );
 }

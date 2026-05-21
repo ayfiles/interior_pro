@@ -213,7 +213,6 @@ export interface AdminMusicTrack {
   fileStorageKey: string;
   genre: string | null;
   id: string;
-  instructionsMd: string | null;
   isActive: boolean;
   lengthProfile: "short" | "long";
   name: string;
@@ -1682,7 +1681,7 @@ export async function listAdminMusicTracks() {
   const { data, error } = await admin
     .from("music_tracks")
     .select(
-      "id, name, file_storage_key, duration_seconds, genre, length_profile, track_group_key, instructions_md, plan_json, is_active, created_at",
+      "id, name, file_storage_key, duration_seconds, genre, length_profile, track_group_key, plan_json, is_active, created_at",
     )
     .order("created_at", { ascending: false });
 
@@ -1717,7 +1716,6 @@ export async function listAdminMusicTracks() {
         fileStorageKey: track.file_storage_key,
         genre: track.genre,
         id: track.id,
-        instructionsMd: null,
         isActive: track.is_active,
         lengthProfile: "long",
         name: track.name,
@@ -1733,7 +1731,6 @@ export async function listAdminMusicTracks() {
     file_storage_key: string;
     genre: string | null;
     id: string;
-    instructions_md: string | null;
     is_active: boolean;
     length_profile: "short" | "long";
     name: string;
@@ -1746,7 +1743,6 @@ export async function listAdminMusicTracks() {
       fileStorageKey: track.file_storage_key,
       genre: track.genre,
       id: track.id,
-      instructionsMd: track.instructions_md,
       isActive: track.is_active,
       lengthProfile: track.length_profile,
       name: track.name,

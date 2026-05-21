@@ -1,5 +1,6 @@
-import { Music2, Upload } from "lucide-react";
+import { Music2, Trash2, Upload } from "lucide-react";
 import {
+  deleteAdminMusicTrack,
   toggleAdminMusicTrack,
   updateAdminMusicTrackPlan,
   upsertAdminMusicTrack,
@@ -123,40 +124,20 @@ export default async function AdminMusicPage({
               placeholder="midnight-room-pulse"
             />
           </label>
-          <div className="grid gap-3 lg:grid-cols-2">
-            <label className="grid gap-2">
-              <span className="text-sm text-[var(--muted)]">
-                Song instructions Markdown
-              </span>
-              <textarea
-                className="min-h-32 rounded-md border border-[var(--line)] bg-black/35 px-3 py-2 font-mono text-xs outline-none focus:border-[var(--brass)]"
-                name="instructionsMd"
-                placeholder="Paste Musik.md content or upload a .md file below"
-              />
-              <input
-                accept=".md,text/markdown,text/plain"
-                className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 py-2 text-sm outline-none file:mr-3 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-2 file:py-1 file:text-xs file:font-semibold file:text-[#19130b] focus:border-[var(--brass)]"
-                name="instructionsFile"
-                type="file"
-              />
-            </label>
-            <label className="grid gap-2">
-              <span className="text-sm text-[var(--muted)]">
-                Song plan JSON
-              </span>
-              <textarea
-                className="min-h-32 rounded-md border border-[var(--line)] bg-black/35 px-3 py-2 font-mono text-xs outline-none focus:border-[var(--brass)]"
-                name="planJson"
-                placeholder='{"cutPointsSeconds":[0,4.74,9.94]}'
-              />
-              <input
-                accept=".json,application/json,text/plain"
-                className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 py-2 text-sm outline-none file:mr-3 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-2 file:py-1 file:text-xs file:font-semibold file:text-[#19130b] focus:border-[var(--brass)]"
-                name="planFile"
-                type="file"
-              />
-            </label>
-          </div>
+          <label className="grid gap-2">
+            <span className="text-sm text-[var(--muted)]">Cut points JSON</span>
+            <textarea
+              className="min-h-32 rounded-md border border-[var(--line)] bg-black/35 px-3 py-2 font-mono text-xs outline-none focus:border-[var(--brass)]"
+              name="planJson"
+              placeholder='{"cutPointsSeconds":[0,4.74,9.94]}'
+            />
+            <input
+              accept=".json,application/json,text/plain"
+              className="h-10 rounded-md border border-[var(--line)] bg-black/35 px-3 py-2 text-sm outline-none file:mr-3 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-2 file:py-1 file:text-xs file:font-semibold file:text-[#19130b] focus:border-[var(--brass)]"
+              name="planFile"
+              type="file"
+            />
+          </label>
         </form>
       </section>
 
@@ -188,16 +169,6 @@ export default async function AdminMusicPage({
                       <p className="break-all font-mono text-xs text-[var(--muted)]">
                         {track.fileStorageKey}
                       </p>
-                      {track.instructionsMd ? (
-                        <details className="mt-2 text-xs text-[var(--muted)]">
-                          <summary className="cursor-pointer text-[var(--brass)]">
-                            Song instructions
-                          </summary>
-                          <pre className="mt-2 max-h-48 overflow-auto rounded-md border border-white/10 bg-black/30 p-2 whitespace-pre-wrap">
-                            {track.instructionsMd}
-                          </pre>
-                        </details>
-                      ) : null}
                     </td>
                     <td className="px-4 py-3">{track.genre ?? "n/a"}</td>
                     <td className="px-4 py-3">
@@ -228,30 +199,16 @@ export default async function AdminMusicPage({
                           />
                           <textarea
                             className="min-h-28 rounded-md border border-[var(--line)] bg-black/35 px-2 py-2 font-mono text-xs outline-none focus:border-[var(--brass)]"
-                            defaultValue={track.instructionsMd ?? ""}
-                            name="instructionsMd"
-                            placeholder="Song instructions Markdown"
-                          />
-                          <textarea
-                            className="min-h-28 rounded-md border border-[var(--line)] bg-black/35 px-2 py-2 font-mono text-xs outline-none focus:border-[var(--brass)]"
                             defaultValue={formatPlanJson(track.planJson)}
                             name="planJson"
                             placeholder='{"cutPointsSeconds":[0,4.74,9.94]}'
                           />
-                          <div className="grid gap-2">
-                            <input
-                              accept=".md,text/markdown,text/plain"
-                              className="h-9 rounded-md border border-[var(--line)] bg-black/35 px-2 py-1 text-xs outline-none file:mr-2 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-2 file:py-1 file:text-xs file:font-semibold file:text-[#19130b] focus:border-[var(--brass)]"
-                              name="instructionsFile"
-                              type="file"
-                            />
-                            <input
-                              accept=".json,application/json,text/plain"
-                              className="h-9 rounded-md border border-[var(--line)] bg-black/35 px-2 py-1 text-xs outline-none file:mr-2 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-2 file:py-1 file:text-xs file:font-semibold file:text-[#19130b] focus:border-[var(--brass)]"
-                              name="planFile"
-                              type="file"
-                            />
-                          </div>
+                          <input
+                            accept=".json,application/json,text/plain"
+                            className="h-9 rounded-md border border-[var(--line)] bg-black/35 px-2 py-1 text-xs outline-none file:mr-2 file:rounded-md file:border-0 file:bg-[var(--brass)] file:px-2 file:py-1 file:text-xs file:font-semibold file:text-[#19130b] focus:border-[var(--brass)]"
+                            name="planFile"
+                            type="file"
+                          />
                           <button
                             className="h-9 rounded-md border border-[var(--line)] px-3 text-xs text-[var(--muted)] hover:bg-white/[0.06] hover:text-[var(--foreground)]"
                             type="submit"
@@ -270,6 +227,7 @@ export default async function AdminMusicPage({
                       {formatDateTime(track.createdAt)}
                     </td>
                     <td className="px-4 py-3">
+                      <div className="flex flex-wrap gap-2">
                       <form action={toggleAdminMusicTrack}>
                         <input name="trackId" type="hidden" value={track.id} />
                         <input
@@ -284,6 +242,17 @@ export default async function AdminMusicPage({
                           {track.isActive ? "Disable" : "Enable"}
                         </button>
                       </form>
+                      <form action={deleteAdminMusicTrack}>
+                        <input name="trackId" type="hidden" value={track.id} />
+                        <button
+                          className="inline-flex h-9 items-center gap-2 rounded-md border border-[#7f2e2e] px-3 text-xs text-[#ffb4a8] hover:bg-[#3a1515]"
+                          type="submit"
+                        >
+                          <Trash2 className="size-3.5" />
+                          Delete
+                        </button>
+                      </form>
+                      </div>
                     </td>
                   </tr>
                 ))}

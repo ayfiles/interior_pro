@@ -10,6 +10,7 @@ export interface ImageEnhancementInput {
   sourceImageUrl?: string;
   sourceMimeType: string;
   sourceStorageKey?: string;
+  seed?: number;
   targetResolution: "1K" | "2K" | "4K";
 }
 
@@ -364,11 +365,13 @@ async function createKieNanoBananaProImageTask({
   imageUrl,
   prompt,
   resolution,
+  seed,
 }: {
   aspectRatio: ImageEnhancementInput["aspectRatio"];
   imageUrl: string;
   prompt: string;
   resolution: "1K" | "2K" | "4K";
+  seed?: number;
 }): Promise<KieImageTask> {
   const response = await fetch(`${KIE_API_BASE_URL}/api/v1/jobs/createTask`, {
     body: JSON.stringify({
@@ -378,6 +381,7 @@ async function createKieNanoBananaProImageTask({
         output_format: "png",
         prompt,
         resolution,
+        ...(seed === undefined ? {} : { seed }),
       },
       model: KIE_NANO_BANANA_PRO_MODEL,
     }),
@@ -844,16 +848,34 @@ export async function enhanceImageWithKieNanoBananaPro(
     );
   }
 
-  const task = await createKieNanoBananaProImageTask({
-    aspectRatio: input.aspectRatio,
-    imageUrl: input.sourceImageUrl,
-    prompt: [
-      input.prompt,
-      "",
-      "OUTPUT REQUIREMENT: generate a 2K PNG image for premium architectural image-to-video use. Preserve the exact room, object identity, local colors, materials, geometry, switched-on light states, and visible layout while allowing the requested cinematic photographic finish.",
-    ].join("\n"),
-    resolution: input.targetResolution,
-  });
+  const prompt = [
+    input.prompt,
+    "",
+    "OUTPUT REQUIREMENT: generate a 2K PNG image for premium architectural image-to-video use. Preserve the exact room, object identity, local colors, materials, geometry, switched-on light states, and visible layout while allowing the requested cinematic photographic finish.",
+  ].join("\n");
+  let task: KieImageTask;
+
+  try {
+    task = await createKieNanoBananaProImageTask({
+      aspectRatio: input.aspectRatio,
+      imageUrl: input.sourceImageUrl,
+      prompt,
+      resolution: input.targetResolution,
+      seed: input.seed,
+    });
+  } catch (error) {
+    if (input.seed === undefined) {
+      throw error;
+    }
+
+    // KIE's Nano Banana Pro schema may reject seed; retry without it while the caller still persists the deterministic seed for correlation.
+    task = await createKieNanoBananaProImageTask({
+      aspectRatio: input.aspectRatio,
+      imageUrl: input.sourceImageUrl,
+      prompt,
+      resolution: input.targetResolution,
+    });
+  }
   const record = await pollKieImageTask(task.taskId);
   const resultUrl = record.resultUrls[0];
 

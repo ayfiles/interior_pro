@@ -75,6 +75,13 @@ const SEEDED_PROMPTS = [
     title: "Nano Banana Pro Upscaling",
   },
   {
+    description:
+      "Validates generated photorealistic images against their source render.",
+    filePath: "src/inngest/prompts/validator.md",
+    slug: "validator",
+    title: "Pipeline Validator",
+  },
+  {
     description: "Guides German voiceover tone, length, and sales structure.",
     filePath: "src/inngest/prompts/voice.md",
     slug: "voice",

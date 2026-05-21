@@ -42,12 +42,12 @@ const TEST_STEPS = [
     value: "editor_agent",
   },
   {
-    description: "Builds voice/music plans and generates voiceover audio.",
+    description: "Builds music timing and optionally generates voiceover audio.",
     label: "Voice + Music",
     value: "voice_music",
   },
   {
-    description: "Renders from a manifest, or from clips plus voiceover.",
+    description: "Renders from a manifest or clips; voiceover audio is optional.",
     label: "Remotion Render",
     value: "remotion_render",
   },
@@ -226,6 +226,22 @@ export default async function AdminTestingPage({
               />
             </label>
           </div>
+
+          <label className="flex items-start gap-3 rounded-md border border-white/10 bg-black/20 p-3 text-sm text-[var(--stone)]">
+            <input
+              className="mt-1 size-4 accent-[var(--brass)]"
+              defaultChecked
+              name="skipVoiceover"
+              type="checkbox"
+            />
+            <span>
+              <span className="block font-medium">Skip voiceover for this test</span>
+              <span className="block text-xs text-[var(--muted)]">
+                Render with music and cutpoints only; no ElevenLabs or placeholder
+                voiceover audio will be generated or required.
+              </span>
+            </span>
+          </label>
 
           <label className="grid gap-2">
             <span className="text-sm text-[var(--muted)]">Notes</span>

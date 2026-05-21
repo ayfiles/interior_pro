@@ -7,7 +7,12 @@ import {
   enhanceImageWithKieNanoBananaPro,
   generateVoiceoverAudio,
   getKieTaskRecord,
+  PIPELINE_MAX_RETRIES,
+  PIPELINE_VALIDATOR_CASCADE_ENABLED,
+  resizeForValidation,
   runMediaQcOnVideoBytes,
+  stabilizeVideoBytes,
+  validateOutput,
 } from "@interior-pro/pipeline";
 import {
   buildClipSegmentsFromSources,
@@ -78,6 +83,39 @@ const KLING_DURATION_SECONDS_BY_MODE: Record<KlingGenerationMode, number> = {
 };
 const KLING_POLL_INTERVAL_MS = 10_000;
 const KLING_MAX_POLLS = 90;
+const TESTING_IMAGE_CONCURRENCY = Number(
+  process.env.TESTING_IMAGE_CONCURRENCY ?? 3,
+);
+const TESTING_KLING_CONCURRENCY = Number(
+  process.env.TESTING_KLING_CONCURRENCY ?? 2,
+);
+
+async function mapWithConcurrency<T, R>({
+  concurrency,
+  items,
+  worker,
+}: {
+  concurrency: number;
+  items: T[];
+  worker: (item: T, index: number) => Promise<R>;
+}) {
+  const results = new Array<R>(items.length);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), items.length);
+
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (nextIndex < items.length) {
+        const index = nextIndex;
+
+        nextIndex += 1;
+        results[index] = await worker(items[index], index);
+      }
+    }),
+  );
+
+  return results;
+}
 
 function isJsonObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -276,7 +314,7 @@ function multiShotSceneCountForVariant(
 function shouldTagSegmentsAsMultiShot(
   variant: ArchitecturalKlingMultiPromptVariant | null,
 ) {
-  return variant === "five_scene";
+  return Boolean(variant);
 }
 
 function multiShotVariantFromAsset(
@@ -694,79 +732,128 @@ async function runImageUpscaler(context: TestingRunContext) {
       : null;
   const upscalingPrompt =
     promptOverride ?? (await loadPipelinePrompt("upscaling"));
+  const validatorPrompt = await loadPipelinePrompt("validator");
   const notes =
     typeof context.config.notes === "string" ? context.config.notes : null;
-  const outputs: TestingAsset[] = [];
 
   await writeTestingLog({
-    message: `Nano Banana Pro Upscaler started for ${sourceImages.length} image(s) without Enhancement Agent.`,
+    message: `Nano Banana Pro Upscaler started for ${sourceImages.length} image(s) with validator retry.`,
     metadata: {
       directPrompt: true,
       enhancementAgentEnabled: false,
       model: AI_PROVIDERS.imageEnhancement.model,
       promptSource: promptOverride ? "override" : "upscaling",
       provider: AI_PROVIDERS.imageEnhancement.primary,
+      retryLimit: PIPELINE_MAX_RETRIES,
       targetResolution: "2K",
+      validatorCascadeEnabled: PIPELINE_VALIDATOR_CASCADE_ENABLED,
     },
     runId: context.run.id,
     status: "started",
     step: "image_upscaler",
   });
 
-  for (const [index, image] of sourceImages.entries()) {
+  const results = await mapWithConcurrency({
+    concurrency: TESTING_IMAGE_CONCURRENCY,
+    items: sourceImages,
+    worker: async (image, index) => {
     const sourceImage = await downloadAsset(image);
     const sourceMimeType = inferImageMimeType(
       image.storage_key,
       image.content_type,
     );
-    const result = await runWithTransientProviderRetry({
-      label: `Image upscale ${index + 1}`,
-      operation: async () =>
-        enhanceImageWithKieNanoBananaPro({
-          aspectRatio: "16:9",
-          prompt: buildUpscalingPrompt({
-            markdown: upscalingPrompt,
-            notes,
-            preservationPrompt: null,
-          }),
-          sourceImage,
-          sourceImageUrl: await createSignedAssetUrl(image),
-          sourceMimeType,
-          sourceStorageKey: image.storage_key,
-          targetResolution: "2K",
-        }),
-      runId: context.run.id,
-      step: "image_upscaler",
-    });
-    const extension = extensionForContentType(result.outputMimeType);
-    const output = await uploadTestingOutput({
-      bucket: STORAGE_BUCKETS.sourceAssets,
-      contentType: result.outputMimeType,
-      fileName: `upscaled-${index + 1}.${extension}`,
-      kind: "enhanced_image",
-      label: `Upscaled image ${index + 1}`,
-      metadata: {
-        directPrompt: true,
-        enhancementAgentEnabled: false,
-        model: result.model,
-        outputHeight: result.finalHeight ?? null,
-        outputWidth: result.finalWidth ?? null,
-        promptSource: promptOverride ? "override" : "upscaling",
-        provider: result.provider,
-        taskId: result.taskId ?? null,
-        sourceStorageKey: image.storage_key,
-        targetResolution: "2K",
-      },
-      runId: context.run.id,
-      step: "image_upscaler",
-      value: result.outputImage,
-    });
+    const inputResized = await resizeForValidation(sourceImage);
 
-    outputs.push(
-      await insertAssetFromOutput({
+    for (let attempt = 1; attempt <= PIPELINE_MAX_RETRIES; attempt += 1) {
+      const result = await runWithTransientProviderRetry({
+        label: `Image upscale ${index + 1} attempt ${attempt}`,
+        operation: async () =>
+          enhanceImageWithKieNanoBananaPro({
+            aspectRatio: "16:9",
+            prompt: buildUpscalingPrompt({
+              markdown: upscalingPrompt,
+              notes,
+              preservationPrompt: null,
+            }),
+            sourceImage,
+            sourceImageUrl: await createSignedAssetUrl(image),
+            sourceMimeType,
+            sourceStorageKey: image.storage_key,
+            targetResolution: "2K",
+          }),
+        runId: context.run.id,
+        step: "image_upscaler",
+      });
+      const outputResized = await resizeForValidation(result.outputImage);
+      const validatorResponse = await validateOutput({
+        cascadeEnabled: PIPELINE_VALIDATOR_CASCADE_ENABLED,
+        inputImage: inputResized.data,
+        inputMimeType: inputResized.mimeType,
+        outputImage: outputResized.data,
+        outputMimeType: outputResized.mimeType,
+        prompt: validatorPrompt,
+      });
+      const accepted =
+        validatorResponse.result.overall_decision === "ACCEPT" ||
+        validatorResponse.result.overall_decision === "ACCEPT_WITH_WARNING";
+
+      await writeTestingLog({
+        message: accepted
+          ? `Image ${index + 1} accepted by validator on attempt ${attempt}.`
+          : `Image ${index + 1} rejected by validator on attempt ${attempt}.`,
+        metadata: {
+          attempt,
+          cascadeRan: validatorResponse.cascadeRan,
+          claudeResult: validatorResponse.claudeResult as unknown as Json,
+          decision: validatorResponse.result.overall_decision,
+          failures: validatorResponse.result.critical_failures,
+          geminiResult: validatorResponse.geminiResult as unknown as Json,
+          taskId: result.taskId ?? null,
+        },
+        runId: context.run.id,
+        status: accepted ? "completed" : "failed",
+        step: "image_upscaler",
+      });
+
+      if (!accepted) {
+        continue;
+      }
+
+      const extension = extensionForContentType(result.outputMimeType);
+      const fileName = `upscaled-${index + 1}.${extension}`;
+      const output = await uploadTestingOutput({
         bucket: STORAGE_BUCKETS.sourceAssets,
         contentType: result.outputMimeType,
-        fileName: `upscaled-${index + 1}.${extension}`,
+        fileName,
+        kind: "enhanced_image",
+        label: `Upscaled image ${index + 1}`,
+        metadata: {
+          directPrompt: true,
+          enhancementAgentEnabled: false,
+          model: result.model,
+          outputHeight: result.finalHeight ?? null,
+          outputWidth: result.finalWidth ?? null,
+          promptSource: promptOverride ? "override" : "upscaling",
+          provider: result.provider,
+          sourceStorageKey: image.storage_key,
+          targetResolution: "2K",
+          taskId: result.taskId ?? null,
+          validation: {
+            cascadeRan: validatorResponse.cascadeRan,
+            claudeResult: validatorResponse.claudeResult as unknown as Json,
+            decision: validatorResponse.result.overall_decision,
+            geminiResult: validatorResponse.geminiResult as unknown as Json,
+          },
+        },
+        runId: context.run.id,
+        step: "image_upscaler",
+        value: result.outputImage,
+      });
+
+      return insertAssetFromOutput({
+        bucket: STORAGE_BUCKETS.sourceAssets,
+        contentType: result.outputMimeType,
+        fileName,
         fileSizeBytes: result.outputImage.byteLength,
         kind: "enhanced_image",
         metadata: {
@@ -782,8 +869,27 @@ async function runImageUpscaler(context: TestingRunContext) {
         },
         runId: context.run.id,
         storageKey: output.storageKey,
-      }),
-    );
+      });
+    }
+
+    await writeTestingLog({
+      message: `Image ${index + 1} dropped after ${PIPELINE_MAX_RETRIES} rejected validator attempt(s).`,
+      metadata: {
+        retryLimit: PIPELINE_MAX_RETRIES,
+        sourceStorageKey: image.storage_key,
+      },
+      runId: context.run.id,
+      status: "failed",
+      step: "image_upscaler",
+    });
+
+    return null;
+    },
+  });
+  const outputs = results.filter((asset): asset is TestingAsset => asset !== null);
+
+  if (outputs.length === 0) {
+    throw new Error("All upscaled images were rejected by the validator.");
   }
 
   await writeTestingLog({
@@ -1101,7 +1207,6 @@ async function runKlingVideo(context: TestingRunContext) {
     images,
     requestedMode: normalizeKlingGenerationMode(requestedKlingMode),
   });
-  const outputs: TestingAsset[] = [];
 
   await writeTestingLog({
     message: `Kling Video started for ${clipPlan.length} clip job(s).`,
@@ -1124,7 +1229,10 @@ async function runKlingVideo(context: TestingRunContext) {
     step: "kling_video",
   });
 
-  for (const [index, clipJob] of clipPlan.entries()) {
+  const outputs = await mapWithConcurrency({
+    concurrency: TESTING_KLING_CONCURRENCY,
+    items: clipPlan,
+    worker: async (clipJob, index) => {
     const image = clipJob.image;
     const generationMode = clipJob.generationMode;
     const durationSeconds = KLING_DURATION_SECONDS_BY_MODE[generationMode];
@@ -1134,9 +1242,11 @@ async function runKlingVideo(context: TestingRunContext) {
         ? prompts.multi_shot_three_scene
         : prompts[generationMode];
 
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
     const signedUrl = await createSignedAssetUrl(image);
     const task = await runWithTransientProviderRetry({
-      label: `Kling task create ${clipJob.clipId}`,
+      label: `Kling task create ${clipJob.clipId} attempt ${attempt}`,
       operation: () =>
         createKieKling30Task({
           aspectRatio: KLING_TEST_CONFIG.aspectRatio,
@@ -1161,6 +1271,7 @@ async function runKlingVideo(context: TestingRunContext) {
     await writeTestingLog({
       message: `Kling 3.0 task created for ${clipJob.clipId}.`,
       metadata: {
+        attempt,
         clipId: clipJob.clipId,
         duplicateIndex: clipJob.duplicateIndex,
         durationSeconds,
@@ -1202,8 +1313,66 @@ async function runKlingVideo(context: TestingRunContext) {
       );
     }
 
-    const contentType = getVideoContentType(resultResponse);
-    const videoBytes = new Uint8Array(await resultResponse.arrayBuffer());
+    let contentType = getVideoContentType(resultResponse);
+    let videoBytes = new Uint8Array(await resultResponse.arrayBuffer());
+    let stabilizationApplied = false;
+    let stabilizationError: string | null = null;
+
+    try {
+      const stabilized = await stabilizeVideoBytes({
+        clipStorageKey: clipJob.clipId,
+        videoBytes,
+      });
+      videoBytes = stabilized.videoBytes;
+      contentType = "video/mp4";
+      stabilizationApplied = stabilized.stabilized;
+    } catch (error) {
+      stabilizationError =
+        error instanceof Error ? error.message : "Unknown stabilization error.";
+      await writeTestingLog({
+        message: `Kling ${clipJob.clipId} stabilization failed; continuing with original clip.`,
+        metadata: {
+          attempt,
+          clipId: clipJob.clipId,
+          error: stabilizationError,
+          taskId: task.taskId,
+        },
+        runId: context.run.id,
+        status: "info",
+        step: "kling_video",
+      });
+    }
+
+    const preflightQc = await runMediaQcOnVideoBytes({
+      clipStorageKey: `preflight-${clipJob.clipId}`,
+      expectedDurationSeconds: durationSeconds,
+      videoBytes,
+    });
+
+    if (preflightQc.status !== "passed") {
+      await writeTestingLog({
+        message: `Kling ${clipJob.clipId} failed preflight media QC on attempt ${attempt}.`,
+        metadata: {
+          attempt,
+          clipId: clipJob.clipId,
+          issues: preflightQc.issues,
+          report: preflightQc as unknown as Json,
+          taskId: task.taskId,
+        },
+        runId: context.run.id,
+        status: "failed",
+        step: "kling_video",
+      });
+
+      if (attempt < 2) {
+        continue;
+      }
+
+      throw new Error(
+        `Kling ${clipJob.clipId} failed preflight media QC after ${attempt} attempt(s): ${preflightQc.issues[0] ?? "unknown issue"}`,
+      );
+    }
+
     const extension = extensionForContentType(contentType);
     const output = await uploadTestingOutput({
       bucket: STORAGE_BUCKETS.generatedClips,
@@ -1213,6 +1382,7 @@ async function runKlingVideo(context: TestingRunContext) {
       label: `Kling ${clipJob.clipId}`,
       metadata: {
         clipId: clipJob.clipId,
+        attempt,
         creditsConsumed: record.creditsConsumed ?? null,
         duplicateIndex: clipJob.duplicateIndex,
         durationSeconds,
@@ -1225,6 +1395,8 @@ async function runKlingVideo(context: TestingRunContext) {
         multiShotVariant,
         resultUrls: record.resultUrls,
         sourceStorageKey: image.storage_key,
+        stabilizationApplied,
+        stabilizationError,
         taskId: task.taskId,
       },
       runId: context.run.id,
@@ -1239,6 +1411,7 @@ async function runKlingVideo(context: TestingRunContext) {
       kind: "video_clip",
       metadata: {
         clipId: clipJob.clipId,
+        attempt,
         creditsConsumed: record.creditsConsumed ?? null,
         duplicateIndex: clipJob.duplicateIndex,
         durationSeconds,
@@ -1251,13 +1424,14 @@ async function runKlingVideo(context: TestingRunContext) {
         multiShotVariant,
         outputId: output.id,
         sourceStorageKey: image.storage_key,
+        stabilizationApplied,
+        stabilizationError,
         taskId: task.taskId,
       },
       runId: context.run.id,
       storageKey: output.storageKey,
     });
 
-    outputs.push(asset);
     await writeTestingLog({
       message: `Kling ${clipJob.clipId} generated and stored.`,
       metadata: {
@@ -1265,6 +1439,9 @@ async function runKlingVideo(context: TestingRunContext) {
         contentType,
         fileSizeBytes: videoBytes.byteLength,
         generationMode,
+        preflightQcStatus: preflightQc.status,
+        stabilizationApplied,
+        stabilizationError,
         storageKey: output.storageKey,
         taskId: task.taskId,
       },
@@ -1272,7 +1449,34 @@ async function runKlingVideo(context: TestingRunContext) {
       status: "completed",
       step: "kling_video",
     });
-  }
+
+    return asset;
+    } catch (error) {
+      await writeTestingLog({
+        message: `Kling ${clipJob.clipId} attempt ${attempt} failed.`,
+        metadata: {
+          attempt,
+          clipId: clipJob.clipId,
+          error: error instanceof Error ? error.message : "Unknown Kling error.",
+          generationMode,
+          multiShotVariant,
+        },
+        runId: context.run.id,
+        status: "failed",
+        step: "kling_video",
+      });
+
+      if (attempt < 2) {
+        continue;
+      }
+
+      throw error;
+    }
+    }
+
+    throw new Error(`Kling ${clipJob.clipId} did not produce a usable clip.`);
+    },
+  });
 
   context.assets.push(...outputs);
   await writeTestingLog({
@@ -1288,7 +1492,6 @@ async function runKlingVideo(context: TestingRunContext) {
 interface TestingMusicContext {
   durationSeconds: number | null;
   genre: string | null;
-  instructionsMd: string | null;
   lengthProfile: VideoLengthProfile;
   name: string | null;
   planJson: Json | null;
@@ -1326,6 +1529,10 @@ function configuredMusicId(context: TestingRunContext) {
     : null;
 }
 
+function shouldSkipVoiceover(context: TestingRunContext) {
+  return context.config.skipVoiceover === true;
+}
+
 async function loadMusicContext(
   context: TestingRunContext,
 ): Promise<TestingMusicContext> {
@@ -1334,7 +1541,6 @@ async function loadMusicContext(
   const emptyContext = (genre: string | null = fallbackGenre) => ({
     durationSeconds: null,
     genre,
-    instructionsMd: null,
     lengthProfile,
     name: null,
     planJson: null,
@@ -1360,10 +1566,6 @@ async function loadMusicContext(
           ? metadata.durationSeconds
           : null,
       genre: fallbackGenre,
-      instructionsMd:
-        typeof metadata.instructionsMd === "string"
-          ? metadata.instructionsMd
-          : null,
       lengthProfile,
       name: musicAsset.file_name,
       planJson: isJsonObject(metadata.planJson) ? metadata.planJson : null,
@@ -1382,7 +1584,6 @@ async function loadMusicContext(
     duration_seconds: number | null;
     file_storage_key: string | null;
     genre: string | null;
-    instructions_md?: string | null;
     length_profile?: string | null;
     name: string | null;
     plan_json?: Json | null;
@@ -1398,7 +1599,6 @@ async function loadMusicContext(
     return {
       durationSeconds: track.duration_seconds ?? null,
       genre: track.genre ?? fallbackGenre,
-      instructionsMd: track.instructions_md ?? null,
       lengthProfile:
         track.length_profile === "short" || track.length_profile === "long"
           ? track.length_profile
@@ -1497,7 +1697,7 @@ async function loadMusicContext(
   try {
     return toMusicContext(
       await findMusicTrack(
-        "duration_seconds, file_storage_key, genre, instructions_md, length_profile, name, plan_json, track_group_key",
+        "duration_seconds, file_storage_key, genre, length_profile, name, plan_json, track_group_key",
         true,
       ),
     );
@@ -1508,7 +1708,7 @@ async function loadMusicContext(
 
     return toMusicContext(
       await findMusicTrack(
-        "duration_seconds, file_storage_key, genre, instructions_md, name, plan_json",
+        "duration_seconds, file_storage_key, genre, name, plan_json",
         false,
       ),
     );
@@ -1517,6 +1717,7 @@ async function loadMusicContext(
 
 async function buildEditorContext(context: TestingRunContext) {
   const clips = assetsByKind(context.assets, "video_clip");
+  const skipVoiceover = shouldSkipVoiceover(context);
 
   if (!clips.length) {
     return null;
@@ -1574,7 +1775,16 @@ async function buildEditorContext(context: TestingRunContext) {
         ? context.config.voiceSelection.trim()
         : "speaker_amelie",
   };
+  const musicPlan = buildMusicInstructionPlan({
+    lengthProfile,
+    musicGenre: project.musicGenre,
+    trackDurationSeconds: musicContext.durationSeconds,
+    trackName: musicContext.name,
+    trackPlanJson: musicContext.planJson,
+    trackStorageKey: musicContext.storageKey,
+  });
   const storyPlan = buildEditorStoryPlan({
+    music: musicPlan,
     project,
     segments,
   });
@@ -1583,21 +1793,14 @@ async function buildEditorContext(context: TestingRunContext) {
     project,
     storyPlan,
   });
-  const musicPlan = buildMusicInstructionPlan({
-    lengthProfile,
-    musicGenre: project.musicGenre,
-    trackDurationSeconds: musicContext.durationSeconds,
-    trackInstructionsMd: musicContext.instructionsMd,
-    trackName: musicContext.name,
-    trackPlanJson: musicContext.planJson,
-    trackStorageKey: musicContext.storageKey,
-  });
   const finalEditPlan = buildFinalEditPlan({
     lengthProfile,
     music: musicPlan,
     segments,
     voiceover: voiceoverPlan,
-    voiceoverDurationSeconds: voiceoverPlan.targetDurationSeconds,
+    voiceoverDurationSeconds: skipVoiceover
+      ? null
+      : voiceoverPlan.targetDurationSeconds,
   });
 
   return {
@@ -1675,6 +1878,7 @@ async function runVoiceMusic(context: TestingRunContext) {
   });
 
   const editorContext = await buildEditorContext(context);
+  const skipVoiceover = shouldSkipVoiceover(context);
 
   if (!editorContext) {
     await writeTestingLog({
@@ -1685,6 +1889,39 @@ async function runVoiceMusic(context: TestingRunContext) {
       step: "voice_music",
     });
     return null;
+  }
+
+  if (skipVoiceover) {
+    await uploadJsonResult({
+      label: "Voiceover plan",
+      name: "voiceover-plan",
+      runId: context.run.id,
+      step: "voice_music",
+      value: editorContext.voiceoverPlan as unknown as Json,
+    });
+    await uploadJsonResult({
+      label: "Music plan",
+      name: "music-plan",
+      runId: context.run.id,
+      step: "voice_music",
+      value: editorContext.musicPlan as unknown as Json,
+    });
+    await writeTestingLog({
+      message: "Voice/Music stage completed without voiceover audio.",
+      metadata: {
+        provider: null,
+        voiceoverSkipped: true,
+      },
+      runId: context.run.id,
+      status: "completed",
+      step: "voice_music",
+    });
+
+    return {
+      ...editorContext,
+      voiceAsset: null,
+      voiceover: null,
+    };
   }
 
   const voiceover = await generateVoiceoverAudio({
@@ -1785,12 +2022,15 @@ async function runRemotionRender(context: TestingRunContext) {
 
   if (!manifest) {
     const editorContext = await buildEditorContext(context);
-    const voiceAsset = assetsByKind(context.assets, "voiceover_audio")[0];
+    const skipVoiceover = shouldSkipVoiceover(context);
+    const voiceAsset = skipVoiceover
+      ? null
+      : assetsByKind(context.assets, "voiceover_audio")[0];
 
-    if (!editorContext || !voiceAsset) {
+    if (!editorContext || (!skipVoiceover && !voiceAsset)) {
       await writeTestingLog({
         message:
-          "Remotion render skipped. Upload a render manifest JSON, or provide video clips plus a voiceover audio asset.",
+          "Remotion render skipped. Upload a render manifest JSON, or provide video clips. Voiceover audio is only required when skip voiceover is off.",
         runId: context.run.id,
         status: "skipped",
         step: "remotion_render",
@@ -1800,6 +2040,8 @@ async function runRemotionRender(context: TestingRunContext) {
 
     const admin = createAdminClient();
     const clipSignedUrls = new Map<string, string>();
+    let voiceoverDurationSeconds: number | null = null;
+    let voiceoverSignedUrl: string | null = null;
 
     for (const clip of editorContext.clips) {
       const { data, error } = await admin.storage
@@ -1813,12 +2055,24 @@ async function runRemotionRender(context: TestingRunContext) {
       clipSignedUrls.set(clip.storage_key, data.signedUrl);
     }
 
-    const { data: voiceSignedUrl, error: voiceError } = await admin.storage
-      .from(voiceAsset.bucket)
-      .createSignedUrl(voiceAsset.storage_key, 60 * 60);
+    if (voiceAsset) {
+      const { data: voiceSignedUrlData, error: voiceError } =
+        await admin.storage
+          .from(voiceAsset.bucket)
+          .createSignedUrl(voiceAsset.storage_key, 60 * 60);
 
-    if (voiceError || !voiceSignedUrl?.signedUrl) {
-      throw voiceError ?? new Error("Could not sign voiceover asset.");
+      if (voiceError || !voiceSignedUrlData?.signedUrl) {
+        throw voiceError ?? new Error("Could not sign voiceover asset.");
+      }
+
+      voiceoverDurationSeconds =
+        typeof voiceAsset.metadata === "object" &&
+        voiceAsset.metadata &&
+        isJsonObject(voiceAsset.metadata) &&
+        typeof voiceAsset.metadata.durationSeconds === "number"
+          ? voiceAsset.metadata.durationSeconds
+          : null;
+      voiceoverSignedUrl = voiceSignedUrlData.signedUrl;
     }
 
     const music = await loadMusicContext(context);
@@ -1828,14 +2082,8 @@ async function runRemotionRender(context: TestingRunContext) {
       logoSignedUrl: null,
       musicSignedUrl: music.signedUrl,
       project: editorContext.project,
-      voiceoverDurationSeconds:
-        typeof voiceAsset.metadata === "object" &&
-        voiceAsset.metadata &&
-        isJsonObject(voiceAsset.metadata) &&
-        typeof voiceAsset.metadata.durationSeconds === "number"
-          ? voiceAsset.metadata.durationSeconds
-          : null,
-      voiceoverSignedUrl: voiceSignedUrl.signedUrl,
+      voiceoverDurationSeconds,
+      voiceoverSignedUrl,
     });
   }
 
@@ -1867,11 +2115,41 @@ async function runRemotionRender(context: TestingRunContext) {
     step: "remotion_render",
     value: renderResult.outputBytes,
   });
+  const finalQcReport = await runMediaQcOnVideoBytes({
+    clipStorageKey: output.storageKey,
+    expectedDurationSeconds: renderResult.durationSeconds,
+    videoBytes: renderResult.outputBytes,
+  });
+
+  await uploadJsonResult({
+    label: "Final render QC report",
+    name: "final-render-qc-report",
+    runId: context.run.id,
+    step: "remotion_render",
+    value: finalQcReport as unknown as Json,
+  });
+
+  if (finalQcReport.status !== "passed") {
+    await writeTestingLog({
+      message: "Final rendered video failed media QC.",
+      metadata: {
+        issues: finalQcReport.issues,
+        report: finalQcReport as unknown as Json,
+      },
+      runId: context.run.id,
+      status: "failed",
+      step: "remotion_render",
+    });
+    throw new Error(
+      `Final rendered video failed media QC: ${finalQcReport.issues[0] ?? "unknown issue"}`,
+    );
+  }
 
   await writeTestingLog({
     message: "Remotion render completed.",
     metadata: {
       durationSeconds: renderResult.durationSeconds,
+      finalQcStatus: finalQcReport.status,
       outputStorageKey: output.storageKey,
     },
     runId: context.run.id,

@@ -387,6 +387,62 @@ interface Database {
         };
         Relationships: [];
       };
+      pipeline_attempts: {
+        Insert: {
+          attempt_number: number;
+          cascade_ran?: boolean;
+          claude_response?: Json | null;
+          critical_failures?: string[] | null;
+          decision: "ACCEPT" | "ACCEPT_WITH_WARNING" | "REJECT";
+          gemini_response: Json;
+          generation_cost: number;
+          image_id: string;
+          job_id: string;
+          seed: number;
+          validation_cost: number;
+        };
+        Row: {
+          attempt_number: number;
+          cascade_ran: boolean;
+          claude_response: Json | null;
+          created_at: string;
+          critical_failures: string[] | null;
+          decision: "ACCEPT" | "ACCEPT_WITH_WARNING" | "REJECT";
+          gemini_response: Json;
+          generation_cost: number;
+          id: string;
+          image_id: string;
+          job_id: string;
+          seed: number;
+          validation_cost: number;
+        };
+        Update: never;
+        Relationships: [];
+      };
+      pipeline_outcomes: {
+        Insert: {
+          drop_reason?: string | null;
+          final_output_url?: string | null;
+          image_id: string;
+          job_id: string;
+          status: "success" | "dropped";
+          total_attempts: number;
+          total_cost: number;
+        };
+        Row: {
+          created_at: string;
+          drop_reason: string | null;
+          final_output_url: string | null;
+          id: string;
+          image_id: string;
+          job_id: string;
+          status: "success" | "dropped";
+          total_attempts: number;
+          total_cost: number;
+        };
+        Update: never;
+        Relationships: [];
+      };
       project_images: {
         Insert: never;
         Row: {

@@ -56,6 +56,7 @@ const RUNNING_PROVIDER_JOB_STATUSES = new Set([
   "started",
   "submitted",
 ]);
+const MIN_MUSIC_CUT_SPACING_SECONDS = 0.8;
 const MAX_MUSIC_PLAN_TEXT_LENGTH = 50_000;
 const TEST_RUN_STEPS = new Set([
   "image_upscaler",
@@ -164,45 +165,46 @@ function validateMusicPlanJson(rawPlanJson: string | null) {
     throw new Error("Music plan JSON is invalid.");
   }
 
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Music plan JSON must be an object.");
+  const rawCutPoints = Array.isArray(parsed)
+    ? parsed
+    : parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).cutPointsSeconds
+      : null;
+
+  if (
+    !Array.isArray(rawCutPoints) ||
+    rawCutPoints.some(
+      (item) => typeof item !== "number" || !Number.isFinite(item),
+    )
+  ) {
+    throw new Error("Music plan JSON must define cutPointsSeconds as numbers.");
   }
 
-  const plan = parsed as Record<string, unknown>;
-  const numberArrayKeys = [
-    "cutPointsSeconds",
-    "secondaryAccentPointsSeconds",
-    "preferredHardCutSpacingSeconds",
-  ];
+  const cutPointsSeconds = Array.from(
+    new Set(rawCutPoints.map((point) => Math.round(point * 100) / 100)),
+  ).sort((a, b) => a - b);
 
-  for (const key of numberArrayKeys) {
-    const value = plan[key];
+  if (cutPointsSeconds.length < 2 || cutPointsSeconds[0] !== 0) {
+    throw new Error("Cut points must start at 0 and include at least one cut.");
+  }
 
-    if (value === undefined) {
-      continue;
-    }
-
+  for (let index = 1; index < cutPointsSeconds.length; index += 1) {
     if (
-      !Array.isArray(value) ||
-      value.some((item) => typeof item !== "number" || !Number.isFinite(item))
+      cutPointsSeconds[index] - cutPointsSeconds[index - 1] <
+      MIN_MUSIC_CUT_SPACING_SECONDS
     ) {
-      throw new Error(`${key} must be an array of numbers.`);
+      throw new Error("Cut points must be at least 0.8 seconds apart.");
     }
   }
 
-  return parsed as Json;
-}
-
-function validateMusicInstructionsMd(instructionsMd: string | null) {
-  if (!instructionsMd) {
-    return null;
+  if (Array.isArray(parsed)) {
+    return { cutPointsSeconds } satisfies Json;
   }
 
-  if (instructionsMd.length > MAX_MUSIC_PLAN_TEXT_LENGTH) {
-    throw new Error("Music instructions Markdown is too large.");
-  }
-
-  return instructionsMd;
+  return {
+    ...(parsed as Record<string, Json>),
+    cutPointsSeconds,
+  } satisfies Json;
 }
 
 function safeStorageName(fileName: string, index: number) {
@@ -479,6 +481,7 @@ export async function createAdminTestingRun(formData: FormData) {
   const musicGenre = optionalFormText(formData, "musicGenre");
   const musicId = optionalFormText(formData, "musicId");
   const voiceSelection = optionalFormText(formData, "voiceSelection");
+  const skipVoiceover = formData.get("skipVoiceover") === "on";
   const expectedDurationSecondsRaw = optionalFormText(
     formData,
     "expectedDurationSeconds",
@@ -523,6 +526,7 @@ export async function createAdminTestingRun(formData: FormData) {
     musicId,
     notes,
     promptOverride,
+    skipVoiceover,
     voiceSelection,
   } satisfies Record<string, Json | undefined>;
   const inputSummary: Record<string, Json> = {};
@@ -1245,10 +1249,6 @@ export async function upsertAdminMusicTrack(formData: FormData) {
     (await optionalFormFileText(formData, "planFile")) ??
       optionalFormText(formData, "planJson"),
   );
-  const instructionsMd = validateMusicInstructionsMd(
-    (await optionalFormFileText(formData, "instructionsFile")) ??
-      optionalFormText(formData, "instructionsMd"),
-  );
   const file = formData.get("musicFile");
 
   if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) {
@@ -1257,6 +1257,10 @@ export async function upsertAdminMusicTrack(formData: FormData) {
 
   if (lengthProfile !== "short" && lengthProfile !== "long") {
     throw new Error("Invalid music length profile.");
+  }
+
+  if (!planJson) {
+    throw new Error("Add cut points JSON for this track.");
   }
 
   const admin = createAdminClient();
@@ -1293,7 +1297,7 @@ export async function upsertAdminMusicTrack(formData: FormData) {
       duration_seconds: durationSeconds,
       file_storage_key: fileStorageKey,
       genre,
-      instructions_md: instructionsMd,
+      instructions_md: null,
       is_active: true,
       length_profile: lengthProfile,
       name,
@@ -1314,7 +1318,6 @@ export async function upsertAdminMusicTrack(formData: FormData) {
       durationSeconds,
       fileStorageKey,
       genre,
-      hasInstructions: Boolean(instructionsMd),
       hasPlan: Boolean(planJson),
       lengthProfile,
       name,
@@ -1340,15 +1343,15 @@ export async function updateAdminMusicTrackPlan(formData: FormData) {
     (await optionalFormFileText(formData, "planFile")) ??
       optionalFormText(formData, "planJson"),
   );
-  const instructionsMd = validateMusicInstructionsMd(
-    (await optionalFormFileText(formData, "instructionsFile")) ??
-      optionalFormText(formData, "instructionsMd"),
-  );
+
+  if (!planJson) {
+    throw new Error("Add cut points JSON for this track.");
+  }
   const admin = createAdminClient();
   const { error } = await admin
     .from("music_tracks")
     .update({
-      instructions_md: instructionsMd,
+      instructions_md: null,
       plan_json: planJson,
     })
     .eq("id", trackId);
@@ -1361,7 +1364,6 @@ export async function updateAdminMusicTrackPlan(formData: FormData) {
     action: "music_track.plan_update",
     actor,
     metadata: {
-      hasInstructions: Boolean(instructionsMd),
       hasPlan: Boolean(planJson),
     },
     resourceId: trackId,
@@ -1398,6 +1400,82 @@ export async function toggleAdminMusicTrack(formData: FormData) {
     actor,
     metadata: {
       isActive,
+    },
+    resourceId: trackId,
+    resourceType: "music_track",
+  });
+
+  revalidatePath("/admin/music");
+  redirect("/admin/music?updated=1");
+}
+
+export async function deleteAdminMusicTrack(formData: FormData) {
+  const actor = await requirePlatformAdmin();
+  const trackId = requireFormText(formData, "trackId");
+
+  if (!UUID_PATTERN.test(trackId)) {
+    throw new Error("Invalid music track id.");
+  }
+
+  const admin = createAdminClient();
+  const { data: track, error: trackError } = await admin
+    .from("music_tracks")
+    .select("id, name, file_storage_key")
+    .eq("id", trackId)
+    .single();
+
+  if (trackError) {
+    throw trackError;
+  }
+
+  const { count: siblingFileCount, error: siblingError } = await admin
+    .from("music_tracks")
+    .select("id", { count: "exact", head: true })
+    .eq("file_storage_key", track.file_storage_key)
+    .neq("id", trackId);
+
+  if (siblingError) {
+    throw siblingError;
+  }
+
+  const { error: projectUpdateError } = await admin
+    .from("projects")
+    .update({
+      music_id: null,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("music_id", trackId);
+
+  if (projectUpdateError) {
+    throw projectUpdateError;
+  }
+
+  const { error: deleteError } = await admin
+    .from("music_tracks")
+    .delete()
+    .eq("id", trackId);
+
+  if (deleteError) {
+    throw deleteError;
+  }
+
+  if ((siblingFileCount ?? 0) === 0) {
+    const { error: storageError } = await admin.storage
+      .from(STORAGE_BUCKETS.musicTracks)
+      .remove([track.file_storage_key]);
+
+    if (storageError) {
+      console.error("Failed to remove deleted music track file", storageError);
+    }
+  }
+
+  await writeAdminAuditLog({
+    action: "music_track.delete",
+    actor,
+    metadata: {
+      fileStorageKey: track.file_storage_key,
+      name: track.name,
+      removedStorageFile: (siblingFileCount ?? 0) === 0,
     },
     resourceId: trackId,
     resourceType: "music_track",

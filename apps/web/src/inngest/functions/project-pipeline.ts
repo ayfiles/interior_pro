@@ -13,10 +13,19 @@ import {
   enhanceImageWithKieNanoBananaPro,
   generateVoiceoverAudio,
   getKieTaskRecord,
+  PIPELINE_MAX_COST_PER_IMAGE,
+  PIPELINE_MAX_COST_PER_JOB,
+  PIPELINE_MAX_RETRIES,
+  PIPELINE_VALIDATOR_CASCADE_ENABLED,
+  resizeForValidation,
   runMediaQcOnVideoBytes,
+  stabilizeVideoBytes,
   type KlingModeClassificationResult,
   type MediaQcReport,
+  validateOutput,
+  type ValidatorResult,
 } from "@interior-pro/pipeline";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   buildClipSegmentsFromSources,
@@ -40,13 +49,24 @@ import {
 import { loadPipelinePrompt } from "@/lib/admin/prompts";
 import { createAdminClient, type Json } from "@/lib/supabase/admin";
 
-type PipelineLogStatus = "started" | "completed" | "failed" | "skipped";
+type PipelineLogStatus = "started" | "completed" | "failed" | "skipped" | "info";
 type EnhancedImageResult = {
+  dropReason?: string | null;
+  dropped?: boolean;
   imageId: string;
   orderIndex: number;
   outputMimeType?: string;
-  outputStorageKey: string;
-  skipped: boolean;
+  outputStorageKey?: string | null;
+  skipped?: boolean;
+  totalCost?: number;
+};
+type AttemptLog = {
+  attempt: number;
+  cost: number;
+  decision: ValidatorResult["overall_decision"];
+  failures: string[];
+  providerJobId?: string;
+  seed: number;
 };
 type GeneratedClipResult = {
   callbackPending?: boolean;
@@ -228,16 +248,26 @@ function buildUpscalingPrompt({
   return [
     markdown,
     preservationPrompt,
-    notes
-      ? [
-          "CLIENT NOTES:",
-          "Use these notes only when they do not conflict with the reference image or the image-specific preservation brief.",
-          notes,
-        ].join("\n")
-      : null,
+    notes?.trim() ? `Client notes: ${notes}` : null,
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function deterministicSeed(jobId: string, imageId: string, attempt: number): number {
+  const hex = createHash("sha256")
+    .update(`${jobId}-${imageId}-${attempt}`)
+    .digest("hex")
+    .slice(0, 8);
+
+  return parseInt(hex, 16) % 2147483647;
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
 }
 
 function buildClipStorageKey(enhancedStorageKey: string, clipId: string) {
@@ -525,6 +555,7 @@ function buildFailedMediaQcReport({
         message: `File size is ${fileSizeBytes} bytes.`,
         status: fileSizeBytes > 0 ? "passed" : "failed",
       },
+      cutSimilarity: skippedCheck,
       freezeFrames: skippedCheck,
       resolution: skippedCheck,
     },
@@ -545,6 +576,7 @@ function buildFailedMediaQcReport({
       frameRate: null,
       freezeSegments: [],
       height: null,
+      nearDuplicateCutSeconds: [],
       sceneChangeSeconds: [],
       width: null,
     },
@@ -568,12 +600,16 @@ function getVideoContentType(response: Response) {
 }
 
 function buildUpscalingProviderJobKey({
+  attempt,
   imageId,
   projectId,
+  seed,
   sourceStorageKey,
 }: {
+  attempt?: number;
   imageId: string;
   projectId: string;
+  seed?: number;
   sourceStorageKey: string;
 }) {
   return buildProviderJobKey([
@@ -587,6 +623,9 @@ function buildUpscalingProviderJobKey({
     sourceStorageKey,
     "2k",
     "16:9",
+    ...(attempt === undefined || seed === undefined
+      ? []
+      : ["validated-retry-v1", attempt, seed]),
   ]);
 }
 
@@ -669,7 +708,7 @@ function multiShotSceneCountForVariant(
 function shouldTagSegmentsAsMultiShot(
   variant: ArchitecturalKlingMultiPromptVariant | null,
 ) {
-  return variant === "five_scene";
+  return Boolean(variant);
 }
 
 function buildRenderingProviderJobKey(projectId: string, manifestStorageKey: string) {
@@ -775,6 +814,92 @@ async function writePipelineLog({
 
   if (error) {
     throw error;
+  }
+}
+
+async function safeInsertAttempt({
+  cascadeRan,
+  claudeResponse,
+  criticalFailures,
+  decision,
+  generationCost,
+  geminiResponse,
+  imageId,
+  jobId,
+  seed,
+  attemptNumber,
+  validationCost,
+}: {
+  attemptNumber: number;
+  cascadeRan: boolean;
+  claudeResponse: ValidatorResult | null;
+  criticalFailures: string[];
+  decision: ValidatorResult["overall_decision"];
+  generationCost: number;
+  geminiResponse: ValidatorResult;
+  imageId: string;
+  jobId: string;
+  seed: number;
+  validationCost: number;
+}) {
+  try {
+    const supabase = createAdminClient();
+    const { error } = await supabase.from("pipeline_attempts").insert({
+      attempt_number: attemptNumber,
+      cascade_ran: cascadeRan,
+      claude_response: claudeResponse as unknown as Json,
+      critical_failures: criticalFailures,
+      decision,
+      gemini_response: geminiResponse as unknown as Json,
+      generation_cost: generationCost,
+      image_id: imageId,
+      job_id: jobId,
+      seed,
+      validation_cost: validationCost,
+    });
+
+    if (error) {
+      console.error("Failed to insert pipeline attempt", error);
+    }
+  } catch (error) {
+    console.error("Failed to insert pipeline attempt", error);
+  }
+}
+
+async function safeInsertOutcome({
+  dropReason,
+  finalOutputUrl,
+  imageId,
+  jobId,
+  status,
+  totalAttempts,
+  totalCost,
+}: {
+  dropReason: string | null;
+  finalOutputUrl: string | null;
+  imageId: string;
+  jobId: string;
+  status: "success" | "dropped";
+  totalAttempts: number;
+  totalCost: number;
+}) {
+  try {
+    const supabase = createAdminClient();
+    const { error } = await supabase.from("pipeline_outcomes").insert({
+      drop_reason: dropReason,
+      final_output_url: finalOutputUrl,
+      image_id: imageId,
+      job_id: jobId,
+      status,
+      total_attempts: totalAttempts,
+      total_cost: totalCost,
+    });
+
+    if (error) {
+      console.error("Failed to insert pipeline outcome", error);
+    }
+  } catch (error) {
+    console.error("Failed to insert pipeline outcome", error);
   }
 }
 
@@ -944,11 +1069,6 @@ export const projectPipeline = inngest.createFunction(
       "upscaling",
     ].includes(context.project.status);
     const enhancedImages: EnhancedImageResult[] = [];
-    const videoLengthProfile: VideoLengthProfile =
-      context.images.length >= IMAGE_REQUIREMENTS.minImages &&
-      context.images.length <= IMAGE_REQUIREMENTS.maxImages
-        ? getVideoLengthProfileForImageCount(context.images.length)
-        : "long";
 
     if (shouldRunIntakeAndUpscaling) {
       await step.run("mark-queued", async () => {
@@ -968,7 +1088,7 @@ export const projectPipeline = inngest.createFunction(
       await step.run("start-validation", async () => {
         await updateProjectStatus(projectId, "validating");
         await writePipelineLog({
-          message: "Supervisor validation started.",
+          message: "Pipeline validation started.",
           projectId,
           status: "started",
           step: "validation",
@@ -1055,7 +1175,7 @@ export const projectPipeline = inngest.createFunction(
       await step.run("complete-validation", () =>
         writePipelineLog({
           message:
-            "Supervisor validation completed. Ready for image enhancement.",
+            "Pipeline validation completed. Ready for image enhancement.",
           metadata: {
             nextStatus: "upscaling",
           },
@@ -1084,11 +1204,18 @@ export const projectPipeline = inngest.createFunction(
         "load-upscaling-prompt",
         async () => loadPipelinePrompt("upscaling"),
       );
+      const validatorPrompt = await step.run(
+        "load-validator-prompt",
+        async () => loadPipelinePrompt("validator"),
+      );
+      const upscalingImages = [...context.images].sort(
+        (a, b) => a.order_index - b.order_index,
+      );
 
       const upscalingPlan = await step.run("prepare-upscaling-plan", () => ({
         directPrompt: true,
         enhancementAgentEnabled: false,
-        images: context.images.map((image) => ({
+        images: upscalingImages.map((image) => ({
           hasExistingOutput: Boolean(image.upscaled_storage_key),
           imageId: image.id,
           orderIndex: image.order_index,
@@ -1099,16 +1226,42 @@ export const projectPipeline = inngest.createFunction(
         })),
         mode: "real",
         model: AI_PROVIDERS.imageEnhancement.model,
+        maxCostPerImage: PIPELINE_MAX_COST_PER_IMAGE,
+        maxCostPerJob: PIPELINE_MAX_COST_PER_JOB,
+        maxRetries: PIPELINE_MAX_RETRIES,
         provider: AI_PROVIDERS.imageEnhancement.primary,
         promptPath: UPSCALING_PROMPT_PATH,
         targetResolution: "2K",
+        validatorCascadeEnabled: PIPELINE_VALIDATOR_CASCADE_ENABLED,
       }));
+      let jobCostSoFar = 0;
 
-      for (const image of context.images) {
-        const enhancedImage = await step.run(
-          `enhance-image-${image.order_index + 1}`,
+      for (const image of upscalingImages) {
+        const jobCostAtImageStart = jobCostSoFar;
+        const imageOutcome = await step.run(
+          `process-image-${image.order_index + 1}`,
           async () => {
             const supabase = createAdminClient();
+
+            if (image.video_status === "dropped") {
+              await writePipelineLog({
+                message: `Image ${image.order_index + 1} was already dropped. Skipping image enhancement.`,
+                metadata: {
+                  imageId: image.id,
+                },
+                projectId,
+                status: "skipped",
+                step: "upscaling",
+              });
+
+              return {
+                dropped: true,
+                imageId: image.id,
+                orderIndex: image.order_index,
+                skipped: true,
+                totalCost: 0,
+              };
+            }
 
             if (image.upscaled_storage_key) {
               await writePipelineLog({
@@ -1127,6 +1280,7 @@ export const projectPipeline = inngest.createFunction(
                 orderIndex: image.order_index,
                 outputStorageKey: image.upscaled_storage_key,
                 skipped: true,
+                totalCost: 0,
               };
             }
 
@@ -1144,6 +1298,7 @@ export const projectPipeline = inngest.createFunction(
               sourceFile.type || inferImageMimeType(image.original_storage_key);
             const analysisForImage: Json | null = image.analysis;
             const preservationBriefPrompt: string | null = null;
+            const inputResized = await resizeForValidation(sourceBytes);
 
             await writePipelineLog({
               message: `Image ${image.order_index + 1} skipped Enhancement Agent and will use Nano Banana Pro directly.`,
@@ -1164,238 +1319,160 @@ export const projectPipeline = inngest.createFunction(
               notes: context.project.special_notes,
               preservationPrompt: preservationBriefPrompt,
             });
-            const plannedOutputStorageKey = buildEnhancedStorageKey(
-              image.original_storage_key,
-              "image/png",
-            );
-            const providerJob = await ensureProviderJob({
-              idempotencyKey: buildUpscalingProviderJobKey({
-                imageId: image.id,
-                projectId,
-                sourceStorageKey: image.original_storage_key,
-              }),
-              model: AI_PROVIDERS.imageEnhancement.model,
-              outputStorageKey: plannedOutputStorageKey,
-              projectId,
-              projectImageId: image.id,
-              provider: AI_PROVIDERS.imageEnhancement.primary,
-              request: {
-                aspectRatio: "16:9",
-                directPrompt: true,
-                enhancementAgentEnabled: false,
-                promptPath: UPSCALING_PROMPT_PATH,
-                preservationBriefApplied: Boolean(preservationBriefPrompt),
-                preservationBriefSource: "disabled",
-                sourceMimeType,
-                sourceStorageKey: image.original_storage_key,
-                targetResolution: "2K",
-              },
-              step: "upscaling",
-            });
 
-            if (!providerJob.created) {
-              if (
-                ["completed", "requires_manual_retry"].includes(
-                  providerJob.job.status,
-                ) &&
-                providerJob.job.output_storage_key
-              ) {
-                const { error: existingOutputError } = await supabase.storage
-                  .from(STORAGE_BUCKETS.sourceAssets)
-                  .download(providerJob.job.output_storage_key);
+            const { data: signedSource, error: signedSourceError } =
+              await supabase.storage
+                .from(STORAGE_BUCKETS.sourceAssets)
+                .createSignedUrl(image.original_storage_key, 60 * 60);
 
-                if (existingOutputError) {
-                  const message = buildProviderResumeBlockMessage(
-                    providerJob.job,
-                  );
+            if (signedSourceError) {
+              throw signedSourceError;
+            }
 
-                  await writePipelineLog({
-                    message,
-                    metadata: {
-                      imageId: image.id,
-                      providerJobId: providerJob.job.id,
-                      providerJobStatus: providerJob.job.status,
-                      storageError: existingOutputError.message,
-                    },
-                    projectId,
-                    status: "failed",
-                    step: "upscaling",
-                  });
+            if (!signedSource?.signedUrl) {
+              throw new Error(
+                `Could not create a signed URL for source image ${image.order_index + 1}.`,
+              );
+            }
 
-                  throw new Error(message);
-                }
+            let costSoFar = 0;
+            const attempts: AttemptLog[] = [];
+            let acceptedOutput: {
+              bytes: Uint8Array;
+              mimeType: string;
+              providerJobId: string;
+              result: Awaited<ReturnType<typeof enhanceImageWithKieNanoBananaPro>>;
+              storageKey: string;
+            } | null = null;
+            let dropReason: string | null = null;
 
-                const { error: updateError } = await supabase
-                  .from("project_images")
-                  .update({
-                    upscaled_storage_key: providerJob.job.output_storage_key,
-                    video_status: "upscaled",
-                  })
-                  .eq("id", image.id);
-
-                if (updateError) {
-                  throw updateError;
-                }
-
-                if (providerJob.job.status !== "completed") {
-                  await updateProviderJob(providerJob.job.id, {
-                    completed_at: new Date().toISOString(),
-                    status: "completed",
-                  });
-                }
-
-                await writePipelineLog({
-                  message: `Image ${image.order_index + 1} reused completed image enhancement provider job.`,
-                  metadata: {
-                    imageId: image.id,
-                    outputStorageKey: providerJob.job.output_storage_key,
-                    providerJobId: providerJob.job.id,
-                  },
-                  projectId,
-                  status: "skipped",
-                  step: "upscaling",
-                });
-
-                return {
-                  imageId: image.id,
-                  orderIndex: image.order_index,
-                  outputStorageKey: providerJob.job.output_storage_key,
-                  skipped: true,
-                };
+            for (let attempt = 1; attempt <= PIPELINE_MAX_RETRIES; attempt += 1) {
+              if (costSoFar >= PIPELINE_MAX_COST_PER_IMAGE) {
+                dropReason = "cost_cap_exceeded";
+                break;
               }
 
-              const message = buildProviderResumeBlockMessage(providerJob.job);
+              if (jobCostAtImageStart + costSoFar >= PIPELINE_MAX_COST_PER_JOB) {
+                dropReason = "job_cost_cap_exceeded";
+                break;
+              }
 
-              await writePipelineLog({
-                message,
-                metadata: {
+              const seed = deterministicSeed(projectId, image.id, attempt);
+              const providerJob = await ensureProviderJob({
+                idempotencyKey: buildUpscalingProviderJobKey({
+                  attempt,
                   imageId: image.id,
-                  providerJobId: providerJob.job.id,
-                  providerJobStatus: providerJob.job.status,
-                },
+                  projectId,
+                  seed,
+                  sourceStorageKey: image.original_storage_key,
+                }),
+                model: AI_PROVIDERS.imageEnhancement.model,
+                outputStorageKey: null,
                 projectId,
-                status: "failed",
+                projectImageId: image.id,
+                provider: AI_PROVIDERS.imageEnhancement.primary,
+                request: {
+                  aspectRatio: "16:9",
+                  attempt,
+                  directPrompt: true,
+                  enhancementAgentEnabled: false,
+                  promptPath: UPSCALING_PROMPT_PATH,
+                  preservationBriefApplied: Boolean(preservationBriefPrompt),
+                  preservationBriefSource: "disabled",
+                  seed,
+                  sourceMimeType,
+                  sourceStorageKey: image.original_storage_key,
+                  targetResolution: "2K",
+                  validatorCascadeEnabled: PIPELINE_VALIDATOR_CASCADE_ENABLED,
+                },
                 step: "upscaling",
               });
 
-              throw new Error(message);
-            }
+              if (!providerJob.created) {
+                const message = buildProviderResumeBlockMessage(providerJob.job);
 
-            let result: Awaited<
-              ReturnType<typeof enhanceImageWithKieNanoBananaPro>
-            >;
-
-            try {
-              const { data: signedSource, error: signedSourceError } =
-                await supabase.storage
-                  .from(STORAGE_BUCKETS.sourceAssets)
-                  .createSignedUrl(image.original_storage_key, 60 * 60);
-
-              if (signedSourceError) {
-                throw signedSourceError;
-              }
-
-              if (!signedSource?.signedUrl) {
-                throw new Error(
-                  `Could not create a signed URL for source image ${image.order_index + 1}.`,
-                );
-              }
-
-              result = await enhanceImageWithKieNanoBananaPro({
-                aspectRatio: "16:9",
-                prompt: imageSpecificUpscalingPrompt,
-                sourceImage: sourceBytes,
-                sourceImageUrl: signedSource.signedUrl,
-                sourceMimeType,
-                sourceStorageKey: image.original_storage_key,
-                targetResolution: "2K",
-              });
-            } catch (error) {
-              await updateProviderJob(providerJob.job.id, {
-                error_message: getErrorMessage(error),
-                failed_at: new Date().toISOString(),
-                status: "failed",
-              });
-
-              throw error;
-            }
-
-            const outputStorageKey = buildEnhancedStorageKey(
-              image.original_storage_key,
-              result.outputMimeType,
-            );
-            const outputArrayBuffer = result.outputImage.buffer.slice(
-              result.outputImage.byteOffset,
-              result.outputImage.byteOffset + result.outputImage.byteLength,
-            ) as ArrayBuffer;
-
-            try {
-              const { error: uploadError } = await supabase.storage
-                .from(STORAGE_BUCKETS.sourceAssets)
-                .upload(
-                  outputStorageKey,
-                  new Blob([outputArrayBuffer], {
-                    type: result.outputMimeType,
-                  }),
-                  {
-                    contentType: result.outputMimeType,
-                    upsert: true,
-                  },
-                );
-
-              if (uploadError) {
-                throw uploadError;
-              }
-
-              const { error: updateError } = await supabase
-                .from("project_images")
-                .update({
-                  analysis: mergeImageEnhancementAnalysis({
-                    analysis: analysisForImage,
-                    aspectRatio: "16:9",
-                    model: result.model,
-                    preservationBriefPrompt,
-                    provider: result.provider,
+                await writePipelineLog({
+                  message,
+                  metadata: {
+                    attempt,
+                    imageId: image.id,
                     providerJobId: providerJob.job.id,
-                    sourceMimeType,
-                    targetResolution: "2K",
-                  }),
-                  upscaled_storage_key: outputStorageKey,
-                  video_status: "upscaled",
-                })
-                .eq("id", image.id);
+                    providerJobStatus: providerJob.job.status,
+                    seed,
+                  },
+                  projectId,
+                  status: "failed",
+                  step: "upscaling",
+                });
 
-              if (updateError) {
-                throw updateError;
+                throw new Error(message);
               }
-            } catch (error) {
-              await updateProviderJob(providerJob.job.id, {
-                error_message: getErrorMessage(error),
-                output_storage_key: outputStorageKey,
-                response: {
-                  creditsConsumed: result.creditsConsumed ?? null,
-                  finalHeight: result.finalHeight ?? null,
-                  finalWidth: result.finalWidth ?? null,
-                  model: result.model,
-                  originalOutputMimeType: result.originalOutputMimeType ?? null,
-                  outputBytes: result.outputImage.byteLength,
-                  outputMimeType: result.outputMimeType,
-                  provider: result.provider,
-                  responseText: result.responseText ?? null,
-                  taskId: result.taskId ?? null,
-                },
-                status: "requires_manual_retry",
+
+              let result: Awaited<
+                ReturnType<typeof enhanceImageWithKieNanoBananaPro>
+              >;
+
+              try {
+                result = await enhanceImageWithKieNanoBananaPro({
+                  aspectRatio: "16:9",
+                  prompt: imageSpecificUpscalingPrompt,
+                  seed,
+                  sourceImage: sourceBytes,
+                  sourceImageUrl: signedSource.signedUrl,
+                  sourceMimeType,
+                  sourceStorageKey: image.original_storage_key,
+                  targetResolution: "2K",
+                });
+              } catch (error) {
+                await updateProviderJob(providerJob.job.id, {
+                  error_message: getErrorMessage(error),
+                  failed_at: new Date().toISOString(),
+                  status: "failed",
+                });
+
+                throw error;
+              }
+
+              const generationCost = estimateKieCostUsd(result.creditsConsumed) ?? 0;
+              costSoFar += generationCost;
+
+              const outputResized = await resizeForValidation(result.outputImage);
+              const validatorResponse = await validateOutput({
+                cascadeEnabled: PIPELINE_VALIDATOR_CASCADE_ENABLED,
+                inputImage: inputResized.data,
+                inputMimeType: inputResized.mimeType,
+                outputImage: outputResized.data,
+                outputMimeType: outputResized.mimeType,
+                prompt: validatorPrompt,
+              });
+              const validationCost = validatorResponse.estimatedCostUsd;
+              costSoFar += validationCost;
+
+              await safeInsertAttempt({
+                attemptNumber: attempt,
+                cascadeRan: validatorResponse.cascadeRan,
+                claudeResponse: validatorResponse.claudeResult,
+                criticalFailures: validatorResponse.result.critical_failures,
+                decision: validatorResponse.result.overall_decision,
+                generationCost,
+                geminiResponse: validatorResponse.geminiResult,
+                imageId: image.id,
+                jobId: projectId,
+                seed,
+                validationCost,
               });
 
-              throw error;
-            }
+              attempts.push({
+                attempt,
+                cost: generationCost + validationCost,
+                decision: validatorResponse.result.overall_decision,
+                failures: validatorResponse.result.critical_failures,
+                providerJobId: providerJob.job.id,
+                seed,
+              });
 
-            await updateProviderJob(providerJob.job.id, {
-              completed_at: new Date().toISOString(),
-              credits_consumed: result.creditsConsumed ?? null,
-              estimated_cost_usd: estimateKieCostUsd(result.creditsConsumed),
-              output_storage_key: outputStorageKey,
-              response: {
+              const providerResponse = {
+                attempt,
                 creditsConsumed: result.creditsConsumed ?? null,
                 finalHeight: result.finalHeight ?? null,
                 finalWidth: result.finalWidth ?? null,
@@ -1405,24 +1482,194 @@ export const projectPipeline = inngest.createFunction(
                 outputMimeType: result.outputMimeType,
                 provider: result.provider,
                 responseText: result.responseText ?? null,
+                seed,
                 taskId: result.taskId ?? null,
-              },
-              status: "completed",
+                validation: {
+                  cascadeRan: validatorResponse.cascadeRan,
+                  claudeResult: validatorResponse.claudeResult as unknown as Json,
+                  decision: validatorResponse.result.overall_decision,
+                  estimatedCostUsd: validationCost,
+                  geminiResult: validatorResponse.geminiResult as unknown as Json,
+                },
+              };
+
+              if (
+                validatorResponse.result.overall_decision === "ACCEPT" ||
+                validatorResponse.result.overall_decision ===
+                  "ACCEPT_WITH_WARNING"
+              ) {
+                const outputStorageKey = buildEnhancedStorageKey(
+                  image.original_storage_key,
+                  result.outputMimeType,
+                );
+
+                try {
+                  const { error: uploadError } = await supabase.storage
+                    .from(STORAGE_BUCKETS.sourceAssets)
+                    .upload(
+                      outputStorageKey,
+                      new Blob([toArrayBuffer(result.outputImage)], {
+                        type: result.outputMimeType,
+                      }),
+                      {
+                        contentType: result.outputMimeType,
+                        upsert: true,
+                      },
+                    );
+
+                  if (uploadError) {
+                    throw uploadError;
+                  }
+
+                  const { error: updateError } = await supabase
+                    .from("project_images")
+                    .update({
+                      analysis: mergeImageEnhancementAnalysis({
+                        analysis: analysisForImage,
+                        aspectRatio: "16:9",
+                        model: result.model,
+                        preservationBriefPrompt,
+                        provider: result.provider,
+                        providerJobId: providerJob.job.id,
+                        sourceMimeType,
+                        targetResolution: "2K",
+                      }),
+                      upscaled_storage_key: outputStorageKey,
+                      video_status: "upscaled",
+                    })
+                    .eq("id", image.id);
+
+                  if (updateError) {
+                    throw updateError;
+                  }
+
+                  await updateProviderJob(providerJob.job.id, {
+                    completed_at: new Date().toISOString(),
+                    credits_consumed: result.creditsConsumed ?? null,
+                    estimated_cost_usd: generationCost,
+                    output_storage_key: outputStorageKey,
+                    response: providerResponse,
+                    status: "completed",
+                  });
+
+                  acceptedOutput = {
+                    bytes: result.outputImage,
+                    mimeType: result.outputMimeType,
+                    providerJobId: providerJob.job.id,
+                    result,
+                    storageKey: outputStorageKey,
+                  };
+                } catch (error) {
+                  await updateProviderJob(providerJob.job.id, {
+                    error_message: getErrorMessage(error),
+                    output_storage_key: outputStorageKey,
+                    response: providerResponse,
+                    status: "requires_manual_retry",
+                  });
+
+                  throw error;
+                }
+
+                break;
+              }
+
+              await updateProviderJob(providerJob.job.id, {
+                completed_at: new Date().toISOString(),
+                credits_consumed: result.creditsConsumed ?? null,
+                estimated_cost_usd: generationCost,
+                response: providerResponse,
+                status: "completed",
+              });
+
+              await writePipelineLog({
+                message: `Image ${image.order_index + 1} rejected on attempt ${attempt}; retrying if budget allows.`,
+                metadata: {
+                  attempt,
+                  creditsConsumed: result.creditsConsumed ?? null,
+                  decision: validatorResponse.result.overall_decision,
+                  failures: validatorResponse.result.critical_failures,
+                  imageId: image.id,
+                  providerJobId: providerJob.job.id,
+                  seed,
+                  totalCost: costSoFar,
+                },
+                projectId,
+                status: "failed",
+                step: "upscaling",
+              });
+            }
+
+            if (!acceptedOutput) {
+              dropReason ??= "max_retries_exceeded";
+
+              const { error: updateError } = await supabase
+                .from("project_images")
+                .update({
+                  video_status: "dropped",
+                })
+                .eq("id", image.id);
+
+              if (updateError) {
+                throw updateError;
+              }
+
+              await safeInsertOutcome({
+                dropReason,
+                finalOutputUrl: null,
+                imageId: image.id,
+                jobId: projectId,
+                status: "dropped",
+                totalAttempts: attempts.length,
+                totalCost: costSoFar,
+              });
+
+              await writePipelineLog({
+                message: `Image ${image.order_index + 1} dropped after ${attempts.length} attempts (${dropReason}).`,
+                metadata: {
+                  attempts,
+                  dropReason,
+                  imageId: image.id,
+                  totalCost: costSoFar,
+                },
+                projectId,
+                status: "failed",
+                step: "upscaling",
+              });
+
+              return {
+                dropReason,
+                dropped: true,
+                imageId: image.id,
+                orderIndex: image.order_index,
+                totalCost: costSoFar,
+              };
+            }
+
+            await safeInsertOutcome({
+              dropReason: null,
+              finalOutputUrl: acceptedOutput.storageKey,
+              imageId: image.id,
+              jobId: projectId,
+              status: "success",
+              totalAttempts: attempts.length,
+              totalCost: costSoFar,
             });
 
             await writePipelineLog({
-              message: `Image ${image.order_index + 1} enhanced and stored.`,
+              message: `Image ${image.order_index + 1} accepted on attempt ${attempts.length}.`,
               metadata: {
+                attempts,
                 imageId: image.id,
-                outputMimeType: result.outputMimeType,
-                outputStorageKey,
-                outputHeight: result.finalHeight ?? null,
-                outputWidth: result.finalWidth ?? null,
-                provider: result.provider,
-                providerJobId: providerJob.job.id,
+                outputMimeType: acceptedOutput.mimeType,
+                outputStorageKey: acceptedOutput.storageKey,
+                outputHeight: acceptedOutput.result.finalHeight ?? null,
+                outputWidth: acceptedOutput.result.finalWidth ?? null,
+                provider: acceptedOutput.result.provider,
+                providerJobId: acceptedOutput.providerJobId,
                 sourceStorageKey: image.original_storage_key,
                 targetResolution: "2K",
-                taskId: result.taskId ?? null,
+                taskId: acceptedOutput.result.taskId ?? null,
+                totalCost: costSoFar,
               },
               projectId,
               status: "completed",
@@ -1432,14 +1679,16 @@ export const projectPipeline = inngest.createFunction(
             return {
               imageId: image.id,
               orderIndex: image.order_index,
-              outputMimeType: result.outputMimeType,
-              outputStorageKey,
+              outputMimeType: acceptedOutput.mimeType,
+              outputStorageKey: acceptedOutput.storageKey,
               skipped: false,
+              totalCost: costSoFar,
             };
           },
         );
 
-        enhancedImages.push(enhancedImage);
+        jobCostSoFar += imageOutcome.totalCost ?? 0;
+        enhancedImages.push(imageOutcome);
       }
 
       await step.run("complete-upscaling", async () => {
@@ -1460,13 +1709,32 @@ export const projectPipeline = inngest.createFunction(
     }
 
     const enhancedStorageKeys = new Map(
-      enhancedImages.map((image) => [image.imageId, image.outputStorageKey]),
+      enhancedImages
+        .filter((image) => image.outputStorageKey)
+        .map((image) => [image.imageId, image.outputStorageKey ?? null]),
     );
-    const videoImageSources: ProjectImageSource[] = context.images.map((image) => ({
-      ...image,
-      upscaled_storage_key:
-        image.upscaled_storage_key ?? enhancedStorageKeys.get(image.id) ?? null,
-    }));
+    const droppedImageIds = new Set(
+      enhancedImages
+        .filter((image) => image.dropped)
+        .map((image) => image.imageId),
+    );
+    const videoImageSources: ProjectImageSource[] = context.images
+      .map((image) => ({
+        ...image,
+        upscaled_storage_key:
+          image.upscaled_storage_key ?? enhancedStorageKeys.get(image.id) ?? null,
+      }))
+      .filter(
+        (image) =>
+          image.video_status !== "dropped" &&
+          !droppedImageIds.has(image.id) &&
+          Boolean(image.upscaled_storage_key),
+      );
+    const videoLengthProfile: VideoLengthProfile =
+      videoImageSources.length >= IMAGE_REQUIREMENTS.minImages &&
+      videoImageSources.length <= IMAGE_REQUIREMENTS.maxImages
+        ? getVideoLengthProfileForImageCount(videoImageSources.length)
+        : "long";
     const kieCallbackUrl = getKieCallbackUrl();
     const shouldUseKieCallback = Boolean(kieCallbackUrl);
     const generatedClips: GeneratedClipResult[] = [];
@@ -1504,43 +1772,51 @@ export const projectPipeline = inngest.createFunction(
           const sourceById = new Map(
             videoImageSources.map((image) => [image.id, image]),
           );
-          const classificationImages = await Promise.all(
-            videoImageSources.map(async (image) => {
-              if (!image.upscaled_storage_key) {
-                throw new Error(
-                  `Image ${image.order_index + 1} has no enhanced storage key for Video Agent analysis.`,
-                );
-              }
+          const classificationImages = (
+            await Promise.all(
+              videoImageSources.map(async (image) => {
+                if (
+                  image.video_status === "dropped" ||
+                  !image.upscaled_storage_key
+                ) {
+                  return null;
+                }
 
-              const { data: file, error } = await supabase.storage
-                .from(STORAGE_BUCKETS.sourceAssets)
-                .download(image.upscaled_storage_key);
+                const { data: file, error } = await supabase.storage
+                  .from(STORAGE_BUCKETS.sourceAssets)
+                  .download(image.upscaled_storage_key);
 
-              if (error) {
-                throw error;
-              }
+                if (error) {
+                  throw error;
+                }
 
-              if (!file) {
-                throw new Error(
-                  `Could not download enhanced image ${image.order_index + 1} for Video Agent analysis.`,
-                );
-              }
+                if (!file) {
+                  throw new Error(
+                    `Could not download enhanced image ${image.order_index + 1} for Video Agent analysis.`,
+                  );
+                }
 
-              return {
-                enhancedImage: new Uint8Array(await file.arrayBuffer()),
-                enhancedStorageKey: image.upscaled_storage_key,
-                imageId: image.id,
-                orderIndex: image.order_index,
-                sourceMimeType: inferImageMimeType(image.upscaled_storage_key),
-              };
-            }),
-          );
+                return {
+                  enhancedImage: new Uint8Array(await file.arrayBuffer()),
+                  enhancedStorageKey: image.upscaled_storage_key,
+                  imageId: image.id,
+                  orderIndex: image.order_index,
+                  sourceMimeType: inferImageMimeType(image.upscaled_storage_key),
+                };
+              }),
+            )
+          ).filter((item): item is NonNullable<typeof item> => Boolean(item));
+
+          if (classificationImages.length === 0) {
+            return [];
+          }
+
           const rawResult = await classifyImagesForKlingModes({
             images: classificationImages,
             prompt: videoAgentPrompt,
           });
           const result = normalizeVideoAgentResult({
-            imageCount: videoImageSources.length,
+            imageCount: classificationImages.length,
             result: rawResult,
           });
           const multiShotCount = result.decisions.filter(
@@ -1629,7 +1905,7 @@ export const projectPipeline = inngest.createFunction(
         await writePipelineLog({
           message: "Kling video generation step started.",
           metadata: {
-            imageCount: context.images.length,
+            imageCount: videoImageSources.length,
             jobCount: clipPlan.length,
             lengthProfile: videoLengthProfile,
             mode: "real",
@@ -1692,10 +1968,34 @@ export const projectPipeline = inngest.createFunction(
               ? klingPrompts[multiShotPromptKeyForVariant(multiShotVariant)]
               : klingPrompts.single_shot;
 
-          if (!image.upscaled_storage_key) {
-            throw new Error(
-              `Image ${image.order_index + 1} has no enhanced storage key.`,
-            );
+          if (image.video_status === "dropped" || !image.upscaled_storage_key) {
+            await writePipelineLog({
+              message: `Image ${image.order_index + 1} has no accepted enhanced image. Skipping Kling generation.`,
+              metadata: {
+                clipId: clipJob.clipId,
+                imageId: image.id,
+                videoStatus: image.video_status,
+              },
+              projectId,
+              status: "skipped",
+              step: "video_generation",
+            });
+
+            return {
+              clipId: clipJob.clipId,
+              clipStorageKey: "",
+              durationSeconds,
+              generationMode,
+              imageId: image.id,
+              multiShotSceneCount:
+                multiShotVariant === null
+                  ? null
+                  : multiShotSceneCountForVariant(multiShotVariant),
+              multiShotVariant,
+              orderIndex: image.order_index,
+              skipped: true,
+              tagSegmentsAsMultiShot: shouldTagSegmentsAsMultiShot(multiShotVariant),
+            };
           }
 
           const { data: signedImage, error: signedImageError } =
@@ -2206,8 +2506,36 @@ export const projectPipeline = inngest.createFunction(
               );
             }
 
-            const contentType = getVideoContentType(resultResponse);
-            const clipBytes = await resultResponse.arrayBuffer();
+            let contentType = getVideoContentType(resultResponse);
+            let clipBytes = new Uint8Array(await resultResponse.arrayBuffer());
+            let stabilizationApplied = false;
+            let stabilizationError: string | null = null;
+
+            try {
+              const stabilized = await stabilizeVideoBytes({
+                clipStorageKey: activeTask.clipStorageKey,
+                videoBytes: clipBytes,
+              });
+              clipBytes = stabilized.videoBytes;
+              contentType = "video/mp4";
+              stabilizationApplied = stabilized.stabilized;
+            } catch (error) {
+              stabilizationError = getErrorMessage(error);
+              await writePipelineLog({
+                message:
+                  "Kling clip stabilization failed; continuing with original clip.",
+                metadata: {
+                  clipStorageKey: activeTask.clipStorageKey,
+                  error: stabilizationError,
+                  imageId: image.id,
+                  providerJobId: activeTask.providerJobId,
+                  taskId: activeTask.taskId,
+                },
+                projectId,
+                status: "info",
+                step: "video_generation",
+              });
+            }
 
             const { error: uploadError } = await supabase.storage
               .from(STORAGE_BUCKETS.generatedClips)
@@ -2253,6 +2581,8 @@ export const projectPipeline = inngest.createFunction(
                 model: taskRecord.model ?? "kling-3.0/video",
                 resultJson: taskRecord.resultJson ?? null,
                 resultUrls: taskRecord.resultUrls,
+                stabilizationApplied,
+                stabilizationError,
                 state: taskRecord.state,
                 taskId: activeTask.taskId,
               },
@@ -2274,6 +2604,8 @@ export const projectPipeline = inngest.createFunction(
                 multiShotVariant: activeTask.multiShotVariant,
                 provider: AI_PROVIDERS.imageToVideo.primary,
                 providerJobId: activeTask.providerJobId,
+                stabilizationApplied,
+                stabilizationError,
                 taskId: activeTask.taskId,
               },
               projectId,
@@ -2344,7 +2676,7 @@ export const projectPipeline = inngest.createFunction(
         return {
           callbackPending: true,
           clipCount: generatedClips.length,
-          imageCount: context.images.length,
+          imageCount: videoImageSources.length,
           ok: true,
           projectId,
           status: "generating_video",
@@ -2378,7 +2710,9 @@ export const projectPipeline = inngest.createFunction(
 
     const mediaQcClips = await step.run("load-media-qc-clips", async () => {
       const supabase = createAdminClient();
-      const imageById = new Map(context.images.map((image) => [image.id, image]));
+      const imageById = new Map(
+        videoImageSources.map((image) => [image.id, image]),
+      );
       const { data: providerJobs, error: jobsError } = await supabase
         .from("provider_jobs")
         .select(
@@ -2413,7 +2747,11 @@ export const projectPipeline = inngest.createFunction(
               ? request.durationSeconds
               : KLING_DURATION_SECONDS_BY_MODE[generationMode];
 
-          if (!image || !job.output_storage_key) {
+          if (
+            !image ||
+            image.video_status === "dropped" ||
+            !job.output_storage_key
+          ) {
             return null;
           }
 
@@ -2445,6 +2783,7 @@ export const projectPipeline = inngest.createFunction(
 
       return context.images
         .filter((image) =>
+          image.video_status !== "dropped" &&
           isExistingRealClip({
             videoStatus: image.video_status,
             videoStorageKey: image.video_storage_key,
@@ -2519,7 +2858,7 @@ export const projectPipeline = inngest.createFunction(
 
       return {
         clipCount: 0,
-        imageCount: context.images.length,
+        imageCount: videoImageSources.length,
         ok: false,
         projectId,
         status: "failed",
@@ -2708,7 +3047,7 @@ export const projectPipeline = inngest.createFunction(
       return {
         clipCount: mediaQcClipResults.length,
         failedClipCount: failedMediaQcClips.length,
-        imageCount: context.images.length,
+        imageCount: videoImageSources.length,
         ok: false,
         projectId,
         status: "failed",
@@ -2731,7 +3070,6 @@ export const projectPipeline = inngest.createFunction(
 
     const editorInstructions = await step.run("load-editor-instructions", async () => ({
       editor: await loadPipelinePrompt("editor").catch(() => ""),
-      music: await loadPipelinePrompt("music").catch(() => ""),
       voice: await loadPipelinePrompt("voice").catch(() => ""),
     }));
     const projectPlanningInput = {
@@ -2782,8 +3120,182 @@ export const projectPipeline = inngest.createFunction(
 
       return segments;
     });
+    const musicContext = await step.run("load-music-context", async () => {
+      const supabase = createAdminClient();
+      const targetLengthProfile = videoLengthProfile;
+      type MusicTrackRow = {
+        duration_seconds: number | null;
+        file_storage_key: string | null;
+        genre: string | null;
+        length_profile: VideoLengthProfile;
+        name: string | null;
+        plan_json: Json | null;
+        track_group_key: string | null;
+      };
+      const toMusicContext = (track: MusicTrackRow | null) => ({
+        durationSeconds: track?.duration_seconds ?? null,
+        lengthProfile: track?.length_profile ?? targetLengthProfile,
+        name: track?.name ?? null,
+        planJson: track?.plan_json ?? null,
+        storageKey: track?.file_storage_key ?? null,
+        trackGroupKey: track?.track_group_key ?? null,
+      });
+
+      if (context.project.music_genre === "no_music") {
+        return {
+          durationSeconds: null,
+          lengthProfile: targetLengthProfile,
+          name: null,
+          planJson: null,
+          storageKey: null,
+          trackGroupKey: null,
+        };
+      }
+
+      const selectColumns =
+        "duration_seconds, file_storage_key, genre, length_profile, name, plan_json, track_group_key";
+      const findGenreTrack = async (genre: string | null) => {
+        if (!genre) {
+          return null;
+        }
+
+        const { data, error } = await supabase
+          .from("music_tracks")
+          .select(selectColumns)
+          .eq("is_active", true)
+          .eq("genre", genre)
+          .eq("length_profile", targetLengthProfile)
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
+
+        if (error) {
+          throw error;
+        }
+
+        return data as MusicTrackRow | null;
+      };
+
+      try {
+        if (context.project.music_id) {
+          const { data: selectedTrack, error: selectedError } = await supabase
+            .from("music_tracks")
+            .select(selectColumns)
+            .eq("is_active", true)
+            .eq("id", context.project.music_id)
+            .limit(1)
+            .maybeSingle();
+
+          if (selectedError) {
+            throw selectedError;
+          }
+
+          const selected = selectedTrack as MusicTrackRow | null;
+
+          if (selected?.length_profile === targetLengthProfile) {
+            return toMusicContext(selected);
+          }
+
+          if (selected?.track_group_key) {
+            const { data: siblingTrack, error: siblingError } = await supabase
+              .from("music_tracks")
+              .select(selectColumns)
+              .eq("is_active", true)
+              .eq("track_group_key", selected.track_group_key)
+              .eq("length_profile", targetLengthProfile)
+              .order("created_at", { ascending: false })
+              .limit(1)
+              .maybeSingle();
+
+            if (siblingError) {
+              throw siblingError;
+            }
+
+            if (siblingTrack) {
+              return toMusicContext(siblingTrack as MusicTrackRow);
+            }
+          }
+
+          return toMusicContext(
+            (await findGenreTrack(selected?.genre ?? context.project.music_genre)) ??
+              selected,
+          );
+        }
+
+        return toMusicContext(await findGenreTrack(context.project.music_genre));
+      } catch (error) {
+        if (!(isJsonObject(error) && error.code === "42703")) {
+          throw error;
+        }
+
+        const fallbackQuery = supabase
+          .from("music_tracks")
+          .select("duration_seconds, file_storage_key, name")
+          .eq("is_active", true);
+        const selectedFallbackQuery = context.project.music_id
+          ? fallbackQuery.eq("id", context.project.music_id)
+          : fallbackQuery
+            .eq("genre", context.project.music_genre)
+            .order("created_at", { ascending: false });
+        const { data: fallbackData, error: fallbackError } =
+          await selectedFallbackQuery.limit(1).maybeSingle();
+
+        if (fallbackError) {
+          throw fallbackError;
+        }
+
+        return {
+          durationSeconds: fallbackData?.duration_seconds ?? null,
+          lengthProfile: targetLengthProfile,
+          name: fallbackData?.name ?? null,
+          planJson: null,
+          storageKey: fallbackData?.file_storage_key ?? null,
+          trackGroupKey: null,
+        };
+      }
+    });
+    const musicPlan = await step.run("build-music-instruction-plan", async () => {
+      const plan = buildMusicInstructionPlan({
+        lengthProfile: videoLengthProfile,
+        musicGenre: context.project.music_genre,
+        trackDurationSeconds: musicContext.durationSeconds,
+        trackName: musicContext.name,
+        trackPlanJson: musicContext.planJson,
+        trackStorageKey: musicContext.storageKey,
+      });
+      const storageKey = buildProjectArtifactStorageKey({
+        extension: "json",
+        name: "music-plan",
+        organizationId,
+        projectId,
+      });
+
+      await uploadJsonArtifact({
+        bucket: STORAGE_BUCKETS.finalOutputs,
+        storageKey,
+        value: plan as unknown as Json,
+      });
+      await writePipelineLog({
+        message: musicContext.storageKey
+          ? "Strict music cutpoint plan loaded for the selected track."
+          : "Music plan prepared without a configured music file.",
+        metadata: {
+          cutPointsSeconds: plan.cutPointsSeconds,
+          lengthProfile: videoLengthProfile,
+          plan: plan as unknown as Json,
+          storageKey,
+          trackGroupKey: musicContext.trackGroupKey,
+        },
+        projectId,
+        status: "completed",
+        step: "music",
+      });
+
+      return plan;
+    });
     const storyPlan = await step.run("build-editor-story-plan", async () => {
       const plan = buildEditorStoryPlan({
+        music: musicPlan,
         project: projectPlanningInput,
         segments: clipSegments,
       });
@@ -2899,184 +3411,6 @@ export const projectPipeline = inngest.createFunction(
         storageKey,
         voiceId: voiceover.voiceId,
       };
-    });
-    const musicContext = await step.run("load-music-context", async () => {
-      const supabase = createAdminClient();
-      const targetLengthProfile = videoLengthProfile;
-      type MusicTrackRow = {
-        duration_seconds: number | null;
-        file_storage_key: string | null;
-        genre: string | null;
-        instructions_md: string | null;
-        length_profile: VideoLengthProfile;
-        name: string | null;
-        plan_json: Json | null;
-        track_group_key: string | null;
-      };
-      const toMusicContext = (track: MusicTrackRow | null) => ({
-        durationSeconds: track?.duration_seconds ?? null,
-        instructionsMd: track?.instructions_md ?? null,
-        lengthProfile: track?.length_profile ?? targetLengthProfile,
-        name: track?.name ?? null,
-        planJson: track?.plan_json ?? null,
-        storageKey: track?.file_storage_key ?? null,
-        trackGroupKey: track?.track_group_key ?? null,
-      });
-
-      if (context.project.music_genre === "no_music") {
-        return {
-          durationSeconds: null,
-          instructionsMd: null,
-          lengthProfile: targetLengthProfile,
-          name: null,
-          planJson: null,
-          storageKey: null,
-          trackGroupKey: null,
-        };
-      }
-
-      const selectColumns =
-        "duration_seconds, file_storage_key, genre, instructions_md, length_profile, name, plan_json, track_group_key";
-      const findGenreTrack = async (genre: string | null) => {
-        if (!genre) {
-          return null;
-        }
-
-        const { data, error } = await supabase
-          .from("music_tracks")
-          .select(selectColumns)
-          .eq("is_active", true)
-          .eq("genre", genre)
-          .eq("length_profile", targetLengthProfile)
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (error) {
-          throw error;
-        }
-
-        return data as MusicTrackRow | null;
-      };
-
-      try {
-        if (context.project.music_id) {
-          const { data: selectedTrack, error: selectedError } = await supabase
-            .from("music_tracks")
-            .select(selectColumns)
-            .eq("is_active", true)
-            .eq("id", context.project.music_id)
-            .limit(1)
-            .maybeSingle();
-
-          if (selectedError) {
-            throw selectedError;
-          }
-
-          const selected = selectedTrack as MusicTrackRow | null;
-
-          if (selected?.length_profile === targetLengthProfile) {
-            return toMusicContext(selected);
-          }
-
-          if (selected?.track_group_key) {
-            const { data: siblingTrack, error: siblingError } = await supabase
-              .from("music_tracks")
-              .select(selectColumns)
-              .eq("is_active", true)
-              .eq("track_group_key", selected.track_group_key)
-              .eq("length_profile", targetLengthProfile)
-              .order("created_at", { ascending: false })
-              .limit(1)
-              .maybeSingle();
-
-            if (siblingError) {
-              throw siblingError;
-            }
-
-            if (siblingTrack) {
-              return toMusicContext(siblingTrack as MusicTrackRow);
-            }
-          }
-
-          return toMusicContext(
-            (await findGenreTrack(selected?.genre ?? context.project.music_genre)) ??
-              selected,
-          );
-        }
-
-        return toMusicContext(await findGenreTrack(context.project.music_genre));
-      } catch (error) {
-        if (!(isJsonObject(error) && error.code === "42703")) {
-          throw error;
-        }
-
-        const fallbackQuery = supabase
-          .from("music_tracks")
-          .select("duration_seconds, file_storage_key, name")
-          .eq("is_active", true);
-        const selectedFallbackQuery = context.project.music_id
-          ? fallbackQuery.eq("id", context.project.music_id)
-          : fallbackQuery
-            .eq("genre", context.project.music_genre)
-            .order("created_at", { ascending: false });
-        const { data: fallbackData, error: fallbackError } =
-          await selectedFallbackQuery.limit(1).maybeSingle();
-
-        if (fallbackError) {
-          throw fallbackError;
-        }
-
-        return {
-          durationSeconds: fallbackData?.duration_seconds ?? null,
-          instructionsMd: null,
-          lengthProfile: targetLengthProfile,
-          name: fallbackData?.name ?? null,
-          planJson: null,
-          storageKey: fallbackData?.file_storage_key ?? null,
-          trackGroupKey: null,
-        };
-      }
-    });
-    const musicPlan = await step.run("build-music-instruction-plan", async () => {
-      const plan = buildMusicInstructionPlan({
-        lengthProfile: videoLengthProfile,
-        musicGenre: context.project.music_genre,
-        trackInstructionsMd: musicContext.instructionsMd,
-        trackDurationSeconds: musicContext.durationSeconds,
-        trackName: musicContext.name,
-        trackPlanJson: musicContext.planJson,
-        trackStorageKey: musicContext.storageKey,
-      });
-      const storageKey = buildProjectArtifactStorageKey({
-        extension: "json",
-        name: "music-plan",
-        organizationId,
-        projectId,
-      });
-
-      await uploadJsonArtifact({
-        bucket: STORAGE_BUCKETS.finalOutputs,
-        storageKey,
-        value: plan as unknown as Json,
-      });
-      await writePipelineLog({
-        message: musicContext.storageKey
-          ? "Music instruction plan loaded for the selected track."
-          : "Music instruction plan prepared without a configured music file.",
-        metadata: {
-          lengthProfile: videoLengthProfile,
-          musicInstructionsLoaded: Boolean(editorInstructions.music),
-          plan: plan as unknown as Json,
-          storageKey,
-          trackGroupKey: musicContext.trackGroupKey,
-        },
-        projectId,
-        status: "completed",
-        step: "music",
-      });
-
-      return plan;
     });
     const finalEditPlan = await step.run("build-final-edit-plan", async () => {
       const plan = buildFinalEditPlan({
@@ -3345,7 +3679,7 @@ export const projectPipeline = inngest.createFunction(
 
       return {
         clipCount: mediaQcClipResults.length,
-        imageCount: context.images.length,
+        imageCount: videoImageSources.length,
         ok: false,
         projectId,
         status: "failed",
@@ -3411,7 +3745,7 @@ export const projectPipeline = inngest.createFunction(
     return {
       clipCount: mediaQcClipResults.length,
       finalOutputStorageKey: renderedVideo.storageKey,
-      imageCount: context.images.length,
+      imageCount: videoImageSources.length,
       ok: true,
       projectId,
       status: "completed",

@@ -9,4 +9,4 @@ Rules:
 - Keep sentences short enough for a premium sales film.
 - Avoid exaggerated claims, hype language, and generic filler.
 - End with a clear but soft consultation impulse.
-- The final generated voiceover duration controls the final edit timing.
+- When voiceover is enabled, the generated voiceover duration can influence final edit timing. No-voiceover test runs use the music cutpoint timeline without generated speech.

@@ -9,6 +9,8 @@ Account, Organisation, Dashboard, Projekt-Upload, Inngest-Orchestrierung, Valida
 
 Noch kein fertiges Produkt: Multi-Shot-Video-Generation fuer alle Bilder, echte Musik-Library, echte ElevenLabs-Voices, kreativer LLM-Editor-Agent, echtes Billing, Production Deployment und Retry/Delete/Admin-Flows fehlen noch. Ein erster Editor-/Voiceover-/Remotion-MVP ist verdrahtet und E2E validiert.
 
+Neu seit 2026-05-21: Nach Nano Banana Pro laeuft eine Validator-Kaskade ueber KIE.AI (Gemini 2.5 Pro Vision, danach Claude Sonnet 4.6 Vision bei Gemini-Accept/Warning). Abgelehnte Enhanced Images werden mit deterministischem Seed bis zu `PIPELINE_MAX_RETRIES` neu generiert; nach Budget-Cap oder Max-Retries wird das Bild still als `video_status = dropped` markiert, in `pipeline_attempts`/`pipeline_outcomes` protokolliert und aus den Video-/Editor-/Render-Listen herausgefiltert.
+
 Supabase Projekt: `interiorpro`
 Supabase Project ID: `tjwqzjzgokfmrzesbulu`
 GitHub Repo: `ayfiles/interior_pro`

@@ -1,6 +1,6 @@
 import { AI_PROVIDERS } from "@interior-pro/shared";
 import { STORAGE_BUCKETS } from "@interior-pro/supabase";
-import { getKieTaskRecord } from "@interior-pro/pipeline";
+import { getKieTaskRecord, stabilizeVideoBytes } from "@interior-pro/pipeline";
 import {
   KIE_CALLBACK_RECEIVED_EVENT,
   PROJECT_SUBMITTED_EVENT,
@@ -16,7 +16,7 @@ import {
 } from "@/inngest/provider-jobs";
 import { createAdminClient, type Json } from "@/lib/supabase/admin";
 
-type PipelineLogStatus = "started" | "completed" | "failed" | "skipped";
+type PipelineLogStatus = "started" | "completed" | "failed" | "skipped" | "info";
 
 interface ProjectImageRow {
   id: string;
@@ -323,8 +323,35 @@ export const kieCallbackProcessor = inngest.createFunction(
           );
         }
 
-        const contentType = getVideoContentType(resultResponse);
-        const clipBytes = await resultResponse.arrayBuffer();
+        let contentType = getVideoContentType(resultResponse);
+        let clipBytes = new Uint8Array(await resultResponse.arrayBuffer());
+        let stabilizationApplied = false;
+        let stabilizationError: string | null = null;
+
+        try {
+          const stabilized = await stabilizeVideoBytes({
+            clipStorageKey,
+            videoBytes: clipBytes,
+          });
+          clipBytes = stabilized.videoBytes;
+          contentType = "video/mp4";
+          stabilizationApplied = stabilized.stabilized;
+        } catch (error) {
+          stabilizationError = getErrorMessage(error);
+          await writePipelineLog({
+            message:
+              "KIE callback clip stabilization failed; continuing with original clip.",
+            metadata: {
+              clipStorageKey,
+              error: stabilizationError,
+              providerJobId: context.providerJob.id,
+              taskId: data.taskId,
+            },
+            projectId: context.providerJob.project_id,
+            status: "info",
+            step: "video_generation",
+          });
+        }
 
         const { error: uploadError } = await supabase.storage
           .from(STORAGE_BUCKETS.generatedClips)
@@ -371,6 +398,8 @@ export const kieCallbackProcessor = inngest.createFunction(
             provider: AI_PROVIDERS.imageToVideo.primary,
             resultJson: taskRecord.resultJson ?? null,
             resultUrls,
+            stabilizationApplied,
+            stabilizationError,
             state: taskRecord.state,
             taskId: data.taskId,
           },
@@ -387,6 +416,8 @@ export const kieCallbackProcessor = inngest.createFunction(
             fileSizeBytes: clipBytes.byteLength,
             provider: AI_PROVIDERS.imageToVideo.primary,
             providerJobId: context.providerJob.id,
+            stabilizationApplied,
+            stabilizationError,
             taskId: data.taskId,
           },
           projectId: context.providerJob.project_id,

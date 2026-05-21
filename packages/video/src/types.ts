@@ -7,6 +7,13 @@ export const SALES_PITCH_HEIGHT = 1080;
 export type TransitionKind = "cut" | "crossfade" | "soft_zoom";
 export type VideoLengthProfile = "short" | "long";
 
+export interface MultiShotSection {
+  endSeconds: number;
+  pacing: string | null;
+  startSeconds: number;
+  style: string | null;
+}
+
 export interface SourceClipForPlanning {
   clipId?: string | null;
   clipStorageKey: string;
@@ -39,6 +46,7 @@ export interface ClipSegment {
 
 export interface EditorStoryPlan {
   generatedAt: string;
+  musicCutPointsSeconds: number[];
   projectId: string;
   selectedSegmentIds: string[];
   structure: Array<{
@@ -77,6 +85,7 @@ export interface MusicInstructionPlan {
   instructions: string;
   lengthProfile: VideoLengthProfile;
   minHardCutSpacingSeconds: number | null;
+  multishotSections: MultiShotSection[];
   preferredHardCutSpacingSeconds: number[];
   secondaryAccentPointsSeconds: number[];
   trackDurationSeconds: number | null;
@@ -105,6 +114,14 @@ export interface FinalEditPlan {
   generatedAt: string;
   lengthProfile: VideoLengthProfile;
   music: MusicInstructionPlan;
+  outro: {
+    blurDurationSeconds: number;
+    holdDurationSeconds: number;
+    logoDelaySeconds: number;
+    logoFadeDurationSeconds: number;
+    musicFadeOutDurationSeconds: number;
+    startAtSeconds: number;
+  };
   scenes: FinalEditPlanScene[];
   voiceover: VoiceoverPlan;
 }
@@ -136,9 +153,10 @@ export interface SalesPitchRenderManifest {
   height: number;
   lengthProfile: VideoLengthProfile;
   logo: {
-    position: "intro_then_corner";
+    position: "outro_center";
     url: string | null;
   };
+  outro: FinalEditPlan["outro"];
   project: {
     customerName: string;
     musicGenre: string;

@@ -7,6 +7,7 @@ import {
   type FinalEditPlan,
   type FinalEditPlanScene,
   type MusicInstructionPlan,
+  type MultiShotSection,
   type SalesPitchRenderManifest,
   type SourceClipForPlanning,
   type TransitionKind,
@@ -36,6 +37,14 @@ const TARGET_VOICEOVER_SECONDS = 25;
 const MIN_FINAL_DURATION_SECONDS = 30;
 const MAX_FINAL_DURATION_SECONDS = 45;
 const MIN_DETECTED_SEGMENT_SECONDS = 1;
+const MIN_MUSIC_CUT_SPACING_SECONDS = 0.8;
+const MULTISHOT_SECTION_SCENE_SECONDS = 2;
+const OUTRO_BLUR_SECONDS = 2.5;
+const OUTRO_HOLD_SECONDS = 4;
+const OUTRO_LOGO_DELAY_SECONDS = 1;
+const OUTRO_LOGO_FADE_SECONDS = 1.5;
+const OUTRO_MUSIC_FADE_OUT_SECONDS = 2;
+const OUTRO_TOTAL_SECONDS = OUTRO_BLUR_SECONDS + OUTRO_HOLD_SECONDS;
 const VIDEO_LENGTH_PROFILE_TARGETS: Record<
   VideoLengthProfile,
   {
@@ -62,6 +71,25 @@ function clamp(value: number, min: number, max: number) {
 
 function roundSeconds(value: number) {
   return Math.round(value * 100) / 100;
+}
+
+function validateStrictMusicCutPoints(cutPointsSeconds: number[]) {
+  if (cutPointsSeconds.length < 2 || cutPointsSeconds[0] !== 0) {
+    throw new Error(
+      "Selected music track cutPointsSeconds must start at 0 and include at least one cut.",
+    );
+  }
+
+  for (let index = 1; index < cutPointsSeconds.length; index += 1) {
+    if (
+      cutPointsSeconds[index] - cutPointsSeconds[index - 1] <
+      MIN_MUSIC_CUT_SPACING_SECONDS
+    ) {
+      throw new Error(
+        "Selected music track cutPointsSeconds must be at least 0.8 seconds apart.",
+      );
+    }
+  }
 }
 
 function normalizeDuration(durationSeconds: number | null) {
@@ -132,7 +160,13 @@ function normalizePlanNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function normalizePlanNumberArray(value: unknown) {
+function normalizePlanNumberWithScale(value: unknown, scale = 1) {
+  const number = normalizePlanNumber(value);
+
+  return number === null ? null : roundSeconds(number / scale);
+}
+
+function normalizePlanNumberArray(value: unknown, scale = 1) {
   if (!Array.isArray(value)) {
     return [];
   }
@@ -141,19 +175,142 @@ function normalizePlanNumberArray(value: unknown) {
     new Set(
       value
         .filter((item): item is number => Number.isFinite(item))
-        .map(roundSeconds)
+        .map((item) => roundSeconds(item / scale))
         .filter((item) => item >= 0),
     ),
   ).sort((a, b) => a - b);
 }
 
-function normalizeFadePoint(value: unknown) {
+function mergeSortedSeconds(...values: number[][]) {
+  return Array.from(
+    new Set(
+      values
+        .flat()
+        .filter((value) => Number.isFinite(value) && value >= 0)
+        .map(roundSeconds),
+    ),
+  ).sort((a, b) => a - b);
+}
+
+function normalizeMultishotSections(
+  value: unknown,
+  scale = 1,
+): MultiShotSection[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map((item) => {
+      if (!isRecord(item)) {
+        return null;
+      }
+
+      const startSeconds = normalizePlanNumberWithScale(
+        item.startSeconds ?? item.start,
+        scale,
+      );
+      const endSeconds = normalizePlanNumberWithScale(
+        item.endSeconds ?? item.end,
+        scale,
+      );
+
+      if (
+        startSeconds === null ||
+        endSeconds === null ||
+        endSeconds - startSeconds < MIN_MUSIC_CUT_SPACING_SECONDS
+      ) {
+        return null;
+      }
+
+      return {
+        endSeconds,
+        pacing: typeof item.pacing === "string" ? item.pacing : null,
+        startSeconds,
+        style: typeof item.style === "string" ? item.style : null,
+      };
+    })
+    .filter((section): section is MultiShotSection => section !== null)
+    .sort((a, b) => a.startSeconds - b.startSeconds);
+}
+
+function buildMultishotSectionCutPoints(sections: MultiShotSection[]) {
+  const points: number[] = [];
+
+  for (const section of sections) {
+    points.push(section.startSeconds);
+
+    for (
+      let point = roundSeconds(
+        section.startSeconds + MULTISHOT_SECTION_SCENE_SECONDS,
+      );
+      section.endSeconds - point >= MIN_MUSIC_CUT_SPACING_SECONDS;
+      point = roundSeconds(point + MULTISHOT_SECTION_SCENE_SECONDS)
+    ) {
+      points.push(point);
+    }
+
+    points.push(section.endSeconds);
+  }
+
+  return mergeSortedSeconds(points);
+}
+
+function inferTrackPlanTimeScale({
+  trackDurationSeconds,
+  trackPlan,
+}: {
+  trackDurationSeconds?: number | null;
+  trackPlan: Record<string, unknown> | null;
+}) {
+  if (!trackPlan) {
+    return 1;
+  }
+
+  const rawPlanDuration = normalizePlanNumber(trackPlan.trackDurationSeconds);
+  const rawCutPoints = Array.isArray(trackPlan.cutPointsSeconds)
+    ? trackPlan.cutPointsSeconds.filter((item): item is number =>
+        Number.isFinite(item),
+      )
+    : [];
+  const maxRawTime = Math.max(rawPlanDuration ?? 0, ...rawCutPoints);
+  const actualDuration =
+    typeof trackDurationSeconds === "number" &&
+    Number.isFinite(trackDurationSeconds) &&
+    trackDurationSeconds > 0
+      ? trackDurationSeconds
+      : null;
+
+  if (!Number.isFinite(maxRawTime) || maxRawTime <= 0) {
+    return 1;
+  }
+
+  const candidateScales = [60, 100, 1000];
+
+  if (actualDuration && maxRawTime > actualDuration + 5) {
+    return (
+      candidateScales.find((scale) => {
+        const scaled = maxRawTime / scale;
+
+        return scaled >= 1 && scaled <= actualDuration + 5;
+      }) ?? 1
+    );
+  }
+
+  if (!actualDuration && maxRawTime > 90 && maxRawTime / 60 <= 90) {
+    return 60;
+  }
+
+  return 1;
+}
+
+function normalizeFadePoint(value: unknown, scale = 1) {
   if (!isRecord(value)) {
     return null;
   }
 
-  const start = normalizePlanNumber(value.start);
-  const duration = normalizePlanNumber(value.duration);
+  const start = normalizePlanNumberWithScale(value.start, scale);
+  const duration = normalizePlanNumberWithScale(value.duration, scale);
 
   if (start === null || duration === null || duration <= 0) {
     return null;
@@ -165,13 +322,13 @@ function normalizeFadePoint(value: unknown) {
   };
 }
 
-function normalizeFadeSeconds(value: unknown) {
+function normalizeFadeSeconds(value: unknown, scale = 1) {
   if (!isRecord(value)) {
     return null;
   }
 
-  const fadeIn = normalizeFadePoint(value.in);
-  const fadeOut = normalizeFadePoint(value.out);
+  const fadeIn = normalizeFadePoint(value.in, scale);
+  const fadeOut = normalizeFadePoint(value.out, scale);
 
   if (!fadeIn && !fadeOut) {
     return null;
@@ -232,9 +389,11 @@ export function buildClipSegmentsFromSources(sources: SourceClipForPlanning[]) {
 }
 
 export function buildEditorStoryPlan({
+  music,
   project,
   segments,
 }: {
+  music: MusicInstructionPlan;
   project: ProjectPlanningInput;
   segments: ClipSegment[];
 }): EditorStoryPlan {
@@ -252,6 +411,7 @@ export function buildEditorStoryPlan({
 
   return {
     generatedAt: new Date().toISOString(),
+    musicCutPointsSeconds: music.cutPointsSeconds,
     projectId: project.projectId,
     selectedSegmentIds: selectedSegments.map((segment) => segment.id),
     structure: beats.map((beat, index) => {
@@ -317,7 +477,6 @@ export function buildVoiceoverPlan({
 export function buildMusicInstructionPlan({
   lengthProfile = "long",
   musicGenre,
-  trackInstructionsMd,
   trackDurationSeconds,
   trackName,
   trackPlanJson,
@@ -325,7 +484,6 @@ export function buildMusicInstructionPlan({
 }: {
   lengthProfile?: VideoLengthProfile;
   musicGenre: string;
-  trackInstructionsMd?: string | null;
   trackDurationSeconds?: number | null;
   trackName?: string | null;
   trackPlanJson?: unknown | null;
@@ -354,56 +512,181 @@ export function buildMusicInstructionPlan({
   };
   const trackPlan = isRecord(trackPlanJson) ? trackPlanJson : null;
   const trackRules = isRecord(trackPlan?.rules) ? trackPlan.rules : null;
-  const trackCutPoints = normalizePlanNumberArray(trackPlan?.cutPointsSeconds);
+  const timeScale = inferTrackPlanTimeScale({
+    trackDurationSeconds,
+    trackPlan,
+  });
+  const configuredTrackCutPoints = normalizePlanNumberArray(
+    trackPlan?.cutPointsSeconds,
+    timeScale,
+  );
+  const multishotSections = normalizeMultishotSections(
+    trackPlan?.multishotSections,
+    timeScale,
+  );
+  const trackCutPoints = mergeSortedSeconds(
+    configuredTrackCutPoints,
+    buildMultishotSectionCutPoints(multishotSections),
+  );
   const secondaryAccentPoints = normalizePlanNumberArray(
     trackPlan?.secondaryAccentPointsSeconds,
+    timeScale,
   );
   const preferredHardCutSpacingSeconds = normalizePlanNumberArray(
     trackPlan?.preferredHardCutSpacingSeconds ??
       trackRules?.preferredHardCutSpacingSeconds,
+    timeScale,
   );
   const planInstructions =
     typeof trackPlan?.instructions === "string" && trackPlan.instructions.trim()
       ? trackPlan.instructions.trim()
       : null;
-  const songInstructions = trackInstructionsMd?.trim()
-    ? `Song-specific instructions:\n${trackInstructionsMd.trim()}`
-    : null;
   const profileInstructions =
     lengthProfile === "short"
       ? "Short version: build a compact 18-24 second edit using the short song version and avoid late hard cuts."
       : "Long version: build the full 30-45 second edit using the long song version.";
+  const hasSelectedMusicTrack = Boolean(trackStorageKey);
+
+  if (hasSelectedMusicTrack && trackCutPoints.length === 0) {
+    throw new Error("Selected music track must define cutPointsSeconds.");
+  }
+
+  const cutPointsSeconds = hasSelectedMusicTrack
+    ? trackCutPoints
+    : defaultCutPoints;
+
+  if (hasSelectedMusicTrack) {
+    validateStrictMusicCutPoints(cutPointsSeconds);
+  }
 
   return {
     bpmEstimate: normalizePlanNumber(trackPlan?.bpmEstimate),
-    cutPointsSeconds: trackCutPoints.length ? trackCutPoints : defaultCutPoints,
-    doNotHardCutAfterSeconds: normalizePlanNumber(
+    cutPointsSeconds,
+    doNotHardCutAfterSeconds: normalizePlanNumberWithScale(
       trackPlan?.doNotHardCutAfterSeconds ??
         trackRules?.doNotHardCutAfterSeconds,
+      timeScale,
     ),
-    fadeSeconds: normalizeFadeSeconds(trackPlan?.fadeSeconds),
+    fadeSeconds: normalizeFadeSeconds(trackPlan?.fadeSeconds, timeScale),
     genre: musicGenre,
     instructions: [
-      profileInstructions,
-      genreInstructions[musicGenre] ?? genreInstructions.cinematic_ambient,
+      hasSelectedMusicTrack
+        ? "Strict timeline: scene changes may happen only at cutPointsSeconds from the selected track plan."
+        : profileInstructions,
+      multishotSections.length
+        ? "Multishot sections are mandatory: these timeline ranges must be filled with multi-shot segments only."
+        : null,
+      hasSelectedMusicTrack
+        ? null
+        : genreInstructions[musicGenre] ?? genreInstructions.cinematic_ambient,
       planInstructions,
-      songInstructions,
     ]
       .filter(Boolean)
       .join("\n\n"),
     lengthProfile,
-    minHardCutSpacingSeconds: normalizePlanNumber(
+    minHardCutSpacingSeconds: normalizePlanNumberWithScale(
       trackPlan?.minHardCutSpacingSeconds ??
         trackRules?.minHardCutSpacingSeconds,
+      timeScale,
     ),
+    multishotSections,
     preferredHardCutSpacingSeconds,
     secondaryAccentPointsSeconds: secondaryAccentPoints,
     trackDurationSeconds: trackDurationSeconds ?? null,
     trackName: trackName ?? null,
     trackPlanSource: trackPlan ? "track" : "default",
     trackStorageKey: trackStorageKey ?? null,
-    usableStartSeconds: normalizePlanNumber(trackPlan?.usableStartSeconds) ?? 0,
+    usableStartSeconds:
+      normalizePlanNumberWithScale(trackPlan?.usableStartSeconds, timeScale) ??
+      0,
   };
+}
+
+function buildTrimWindow(
+  segment: ClipSegment,
+  durationSeconds: number,
+  usageIndex: number,
+) {
+  const spareSeconds = roundSeconds(segment.durationSeconds - durationSeconds);
+  const offsetSeconds =
+    spareSeconds > 0.1
+      ? roundSeconds(Math.min(spareSeconds, (usageIndex % 3) * spareSeconds * 0.5))
+      : 0;
+  const startSeconds = roundSeconds(segment.startSeconds + offsetSeconds);
+
+  return {
+    endSeconds: roundSeconds(startSeconds + durationSeconds),
+    startSeconds,
+  };
+}
+
+function selectSegmentForTimelineScene({
+  durationSeconds,
+  previousSegment,
+  preferMultiShot,
+  segmentUseCounts,
+  segments,
+  startAtSeconds,
+}: {
+  durationSeconds: number;
+  previousSegment: ClipSegment | null;
+  preferMultiShot: boolean;
+  segmentUseCounts: Map<string, number>;
+  segments: ClipSegment[];
+  startAtSeconds: number;
+}) {
+  const fittingSegments = segments.filter(
+    (segment) => segment.durationSeconds + 0.03 >= durationSeconds,
+  );
+
+  if (fittingSegments.length === 0) {
+    throw new Error(
+      `No QC-approved clip segment is long enough for the ${durationSeconds}s scene starting at ${startAtSeconds}s.`,
+    );
+  }
+
+  const preferredSegments = fittingSegments.filter(
+    (segment) => segment.isTaggedMultiShot === preferMultiShot,
+  );
+  const candidates =
+    preferredSegments.length > 0 ? preferredSegments : fittingSegments;
+  const nonRepeatCandidates =
+    previousSegment === null
+      ? candidates
+      : candidates.filter(
+          (segment) =>
+            segment.clipStorageKey !== previousSegment.clipStorageKey &&
+            segment.imageId !== previousSegment.imageId,
+        );
+  const scoringCandidates =
+    nonRepeatCandidates.length > 0 ? nonRepeatCandidates : candidates;
+
+  return [...scoringCandidates].sort((a, b) => {
+    const aUseCount = segmentUseCounts.get(a.id) ?? 0;
+    const bUseCount = segmentUseCounts.get(b.id) ?? 0;
+    const score = (segment: ClipSegment, useCount: number) => {
+      let value = useCount * 30;
+
+      if (segment.isTaggedMultiShot !== preferMultiShot) {
+        value += 12;
+      }
+
+      if (previousSegment?.clipStorageKey === segment.clipStorageKey) {
+        value += 8;
+      }
+
+      if (previousSegment?.imageId === segment.imageId) {
+        value += 4;
+      }
+
+      value += Math.max(0, segment.durationSeconds - durationSeconds) * 0.1;
+      value += segment.orderIndex * 0.01;
+
+      return value;
+    };
+
+    return score(a, aUseCount) - score(b, bUseCount);
+  })[0];
 }
 
 export function buildFinalEditPlan({
@@ -425,57 +708,88 @@ export function buildFinalEditPlan({
 
   const resolvedLengthProfile = lengthProfile ?? music.lengthProfile;
   const durationTargets = VIDEO_LENGTH_PROFILE_TARGETS[resolvedLengthProfile];
-  const durationSeconds = clamp(
+  const voiceoverTimingSeconds =
+    voiceoverDurationSeconds === null
+      ? 0
+      : voiceoverDurationSeconds ?? voiceover.targetDurationSeconds;
+  const baseTargetDurationSeconds = clamp(
     Math.max(
       durationTargets.minFinalDurationSeconds,
-      (voiceoverDurationSeconds ?? voiceover.targetDurationSeconds) + 4,
+      voiceoverTimingSeconds + 4,
     ),
     durationTargets.minFinalDurationSeconds,
     durationTargets.maxFinalDurationSeconds,
   );
+  const hasSelectedMusicTrack = Boolean(music.trackStorageKey);
   const latestHardCutSecond =
     music.doNotHardCutAfterSeconds ?? Number.POSITIVE_INFINITY;
-  const minCutSpacing = music.minHardCutSpacingSeconds ?? 0.8;
-  const cutPoints = music.cutPointsSeconds
-    .filter(
-      (point) =>
-        point >= 0 &&
-        point < durationSeconds &&
-        point <= latestHardCutSecond,
-    )
-    .reduce<number[]>((points, point) => {
-      const previous = points.at(-1);
 
-      if (previous === undefined || point - previous >= minCutSpacing) {
-        points.push(point);
-      }
+  if (hasSelectedMusicTrack) {
+    validateStrictMusicCutPoints(music.cutPointsSeconds);
+  }
 
-      return points;
-    }, []);
-  const timelinePoints = Array.from(new Set([...cutPoints, durationSeconds]))
+  const availableCutPoints = Array.from(new Set(music.cutPointsSeconds))
+    .filter((point) => point >= 0 && point <= latestHardCutSecond)
+    .sort((a, b) => a - b);
+  const lastStrictCutPoint = availableCutPoints.at(-1) ?? 0;
+  const durationSeconds = hasSelectedMusicTrack
+    ? clamp(
+        Math.max(baseTargetDurationSeconds, lastStrictCutPoint + OUTRO_TOTAL_SECONDS),
+        durationTargets.minFinalDurationSeconds,
+        durationTargets.maxFinalDurationSeconds,
+      )
+    : baseTargetDurationSeconds;
+  const outroStartSeconds = roundSeconds(
+    Math.max(0, durationSeconds - OUTRO_TOTAL_SECONDS),
+  );
+  const cutPoints = availableCutPoints.filter(
+    (point) => point < outroStartSeconds,
+  );
+
+  if (hasSelectedMusicTrack && cutPoints.length === 0) {
+    throw new Error(
+      "Selected music track has no usable cut points for the final edit.",
+    );
+  }
+
+  const timelinePoints = Array.from(new Set([...cutPoints, outroStartSeconds]))
     .filter((point) => point >= 0)
     .sort((a, b) => a - b);
   const scenes: FinalEditPlanScene[] = [];
+  const segmentUseCounts = new Map<string, number>();
+  let previousSegment: ClipSegment | null = null;
 
   for (let index = 0; index < timelinePoints.length - 1; index += 1) {
     const startAtSeconds = timelinePoints[index];
     const nextPoint = timelinePoints[index + 1];
     const duration = roundSeconds(nextPoint - startAtSeconds);
 
-    if (duration < 0.8) {
-      continue;
+    if (duration < MIN_MUSIC_CUT_SPACING_SECONDS) {
+      throw new Error(
+        `Music cut points ${startAtSeconds}s and ${nextPoint}s are too close for a stable scene.`,
+      );
     }
 
-    const segment = segments[index % segments.length];
-    const maxTrimEnd = segment.endSeconds;
-    const trimStartSeconds = segment.startSeconds;
-    const trimEndSeconds = Math.min(
-      maxTrimEnd,
-      roundSeconds(trimStartSeconds + duration),
-    );
-    const transition: TransitionKind =
-      index === 0 ? "soft_zoom" : index % 3 === 0 ? "crossfade" : "cut";
+    const preferMultiShot = music.multishotSections.some((section) => {
+      const overlapStart = Math.max(startAtSeconds, section.startSeconds);
+      const overlapEnd = Math.min(nextPoint, section.endSeconds);
 
+      return overlapEnd - overlapStart > 0.05;
+    });
+    const segment = selectSegmentForTimelineScene({
+      durationSeconds: duration,
+      previousSegment,
+      preferMultiShot,
+      segmentUseCounts,
+      segments,
+      startAtSeconds,
+    });
+    const usageIndex = segmentUseCounts.get(segment.id) ?? 0;
+    const trim = buildTrimWindow(segment, duration, usageIndex);
+    const transition: TransitionKind = "cut";
+
+    segmentUseCounts.set(segment.id, usageIndex + 1);
+    previousSegment = segment;
     scenes.push({
       clipStorageKey: segment.clipStorageKey,
       durationSeconds: duration,
@@ -486,8 +800,8 @@ export function buildFinalEditPlan({
       segmentId: segment.id,
       startAtSeconds,
       transition,
-      trimEndSeconds,
-      trimStartSeconds,
+      trimEndSeconds: trim.endSeconds,
+      trimStartSeconds: trim.startSeconds,
     });
   }
 
@@ -496,6 +810,14 @@ export function buildFinalEditPlan({
     generatedAt: new Date().toISOString(),
     lengthProfile: resolvedLengthProfile,
     music,
+    outro: {
+      blurDurationSeconds: OUTRO_BLUR_SECONDS,
+      holdDurationSeconds: OUTRO_HOLD_SECONDS,
+      logoDelaySeconds: OUTRO_LOGO_DELAY_SECONDS,
+      logoFadeDurationSeconds: OUTRO_LOGO_FADE_SECONDS,
+      musicFadeOutDurationSeconds: OUTRO_MUSIC_FADE_OUT_SECONDS,
+      startAtSeconds: outroStartSeconds,
+    },
     scenes,
     voiceover,
   };
@@ -545,9 +867,10 @@ export function buildSalesPitchRenderManifest({
     height: SALES_PITCH_HEIGHT,
     lengthProfile: editPlan.lengthProfile,
     logo: {
-      position: "intro_then_corner",
+      position: "outro_center",
       url: logoSignedUrl ?? null,
     },
+    outro: editPlan.outro,
     project: {
       customerName: project.customerName,
       musicGenre: project.musicGenre,

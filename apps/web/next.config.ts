@@ -10,8 +10,9 @@ const nextConfig: NextConfig = {
   reactCompiler: true,
   allowedDevOrigins: ["127.0.0.1"],
   experimental: {
+    proxyClientMaxBodySize: "1gb",
     serverActions: {
-      bodySizeLimit: "100mb",
+      bodySizeLimit: "1gb",
     },
   },
   turbopack: {

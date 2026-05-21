@@ -2,7 +2,7 @@ import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
 import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
-import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -42,6 +42,7 @@ export interface MediaQcReport {
     codec: MediaQcCheck;
     duration: MediaQcCheck;
     fileSize: MediaQcCheck;
+    cutSimilarity: MediaQcCheck;
     freezeFrames: MediaQcCheck;
     resolution: MediaQcCheck;
   };
@@ -62,6 +63,11 @@ export interface MediaQcReport {
     frameRate: number | null;
     freezeSegments: MediaQcSegment[];
     height: number | null;
+    nearDuplicateCutSeconds: Array<{
+      histogramDifference: number;
+      pixelDifference: number;
+      seconds: number;
+    }>;
     sceneChangeSeconds: number[];
     width: number | null;
   };
@@ -76,6 +82,7 @@ export interface MediaQcReport {
 interface RunMediaQcInput {
   clipStorageKey: string;
   expectedDurationSeconds?: number | null;
+  expectedCutSeconds?: number[] | null;
   videoBytes: Uint8Array;
 }
 
@@ -121,6 +128,11 @@ const BLUR_SAMPLE_WIDTH = 160;
 const BLUR_SAMPLE_FPS = 1;
 const BLUR_SAMPLE_MAX_FRAMES = 8;
 const SCENE_CHANGE_THRESHOLD = 0.38;
+const CUT_SAMPLE_WIDTH = 96;
+const CUT_SAMPLE_HEIGHT = 54;
+const CUT_SAMPLE_OFFSET_SECONDS = 0.06;
+const CUT_PIXEL_DIFF_FAIL = 0.018;
+const CUT_HISTOGRAM_DIFF_FAIL = 0.012;
 
 function getFfprobePath() {
   return process.env.FFPROBE_PATH ?? ffprobeInstaller.path;
@@ -145,6 +157,7 @@ function runCommand(
   command: string,
   args: string[],
   options: {
+    cwd?: string;
     maxBufferBytes?: number;
     timeoutMs?: number;
   } = {},
@@ -154,6 +167,7 @@ function runCommand(
 
   return new Promise<CommandResult>((resolve, reject) => {
     const child = spawn(command, args, {
+      cwd: options.cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stderrChunks: Buffer[] = [];
@@ -516,11 +530,13 @@ async function estimateBlurScores({
 
 async function inspectVideoFile({
   clipStorageKey,
+  expectedCutSeconds,
   expectedDurationSeconds,
   filePath,
   fileSizeBytes,
 }: {
   clipStorageKey: string;
+  expectedCutSeconds: number[] | null;
   expectedDurationSeconds: number | null;
   filePath: string;
   fileSizeBytes: number;
@@ -578,6 +594,8 @@ async function inspectVideoFile({
   );
   const blurMedianScore = median(blurFrameScores);
   const durationThreshold = getDurationThreshold(expectedDurationSeconds);
+  const expectedCutCount = expectedCutSeconds?.length ?? 0;
+  const nearDuplicateCutSeconds: MediaQcReport["metrics"]["nearDuplicateCutSeconds"] = [];
   const checks = {
     bitrate: buildCheck(
       bitRateBitsPerSecond === null,
@@ -627,6 +645,13 @@ async function inspectVideoFile({
       false,
       `File size is ${fileSizeBytes} bytes.`,
     ),
+    cutSimilarity: {
+      message:
+        expectedCutCount > 0
+          ? `Cut similarity check skipped for ${expectedCutCount} expected cuts.`
+          : "Cut similarity check skipped; no expected cut timings provided.",
+      status: "skipped",
+    },
     freezeFrames: buildCheck(
       Boolean(
         durationSeconds &&
@@ -672,6 +697,7 @@ async function inspectVideoFile({
       frameRate: parseFrameRate(videoStream?.r_frame_rate),
       freezeSegments,
       height,
+      nearDuplicateCutSeconds,
       sceneChangeSeconds,
       width,
     },
@@ -686,6 +712,7 @@ async function inspectVideoFile({
 
 export async function runMediaQcOnVideoBytes({
   clipStorageKey,
+  expectedCutSeconds = null,
   expectedDurationSeconds = null,
   videoBytes,
 }: RunMediaQcInput) {
@@ -699,10 +726,84 @@ export async function runMediaQcOnVideoBytes({
 
     return await inspectVideoFile({
       clipStorageKey,
+      expectedCutSeconds,
       expectedDurationSeconds,
       filePath: tempVideoPath,
       fileSizeBytes: videoBytes.byteLength,
     });
+  } finally {
+    await rm(tempDirectory, { force: true, recursive: true });
+  }
+}
+
+export async function stabilizeVideoBytes({
+  clipStorageKey,
+  videoBytes,
+}: {
+  clipStorageKey: string;
+  videoBytes: Uint8Array;
+}) {
+  const tempDirectory = await mkdtemp(
+    path.join(tmpdir(), "interior-pro-stabilize-"),
+  );
+  const inputPath = path.join(tempDirectory, "input.mp4");
+  const outputPath = path.join(tempDirectory, "stabilized.mp4");
+
+  try {
+    await ensureExecutable(getFfmpegPath());
+    await writeFile(inputPath, videoBytes);
+    await runCommand(
+      getFfmpegPath(),
+      [
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-i",
+        inputPath,
+        "-vf",
+        "vidstabdetect=shakiness=5:accuracy=9:result=transforms.trf",
+        "-an",
+        "-f",
+        "null",
+        "-",
+      ],
+      {
+        cwd: tempDirectory,
+        timeoutMs: 120_000,
+      },
+    );
+    await runCommand(
+      getFfmpegPath(),
+      [
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-i",
+        inputPath,
+        "-vf",
+        "vidstabtransform=input=transforms.trf:smoothing=18:optzoom=1:interpol=bilinear,unsharp=5:5:0.8:3:3:0.4",
+        "-an",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-crf",
+        "18",
+        "-pix_fmt",
+        "yuv420p",
+        outputPath,
+      ],
+      {
+        cwd: tempDirectory,
+        timeoutMs: 120_000,
+      },
+    );
+
+    return {
+      clipStorageKey,
+      stabilized: true,
+      videoBytes: new Uint8Array(await readFile(outputPath)),
+    };
   } finally {
     await rm(tempDirectory, { force: true, recursive: true });
   }

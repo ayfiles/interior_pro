@@ -22,9 +22,9 @@ Each image may include:
 The enhanced images are the visual source of truth.
 Never invent missing geometry, furniture, colors, materials, lights, windows, decor, or camera angles.
 
-## Supervisor Rules
+## Pipeline Orchestrator Rules
 
-The Supervisor creates the final Kling job plan after your scoring:
+The pipeline orchestrator creates the final Kling job plan after your scoring:
 
 - 2 to 3 input images create a short video and use the short song version.
 - 4 to 8 input images create a long video and use the long song version.
@@ -37,7 +37,7 @@ The Supervisor creates the final Kling job plan after your scoring:
   - 4 images: every image twice.
 - In every valid production run, exactly 2 images are also sent through multi-shot prompts.
 
-Your output must make that supervisor decision easy and deterministic.
+Your output must make that orchestrator decision easy and deterministic.
 
 ## Available Kling Modes
 
@@ -49,15 +49,15 @@ Kling 3.0 Pro supports two relevant generation modes for this pipeline:
 Assign `multi_shot` to exactly the 2 best images for multi-shot generation.
 Assign `single_shot` to all remaining images.
 
-Important: images assigned to `multi_shot` may still also be used for single-shot duplicate jobs by the Supervisor. Your `selectedMode` marks multi-shot eligibility, not exclusive usage.
+Important: images assigned to `multi_shot` may still also be used for single-shot duplicate jobs by the pipeline orchestrator. Your `selectedMode` marks multi-shot eligibility, not exclusive usage.
 
 ## Multi-Shot Variant Ranking
 
 The image with the widest, farthest-away, clearest room perspective should rank first.
-The Supervisor will send the first-ranked multi-shot image to the fast 2-seconds-per-scene multi-shot prompt.
+The pipeline orchestrator will send the first-ranked multi-shot image to the fast 2-seconds-per-scene multi-shot prompt.
 
 The second-ranked multi-shot image should be the next best room perspective.
-The Supervisor will send it to the slower 3-seconds-per-scene multi-shot prompt.
+The pipeline orchestrator will send it to the slower 3-seconds-per-scene multi-shot prompt.
 
 ## What Counts As Wide Perspective
 

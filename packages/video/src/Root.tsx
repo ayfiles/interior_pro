@@ -22,8 +22,16 @@ const defaultManifest: SalesPitchRenderManifest = {
   height: SALES_PITCH_HEIGHT,
   lengthProfile: "long",
   logo: {
-    position: "intro_then_corner",
+    position: "outro_center",
     url: null,
+  },
+  outro: {
+    blurDurationSeconds: 2.5,
+    holdDurationSeconds: 4,
+    logoDelaySeconds: 1,
+    logoFadeDurationSeconds: 1.5,
+    musicFadeOutDurationSeconds: 2,
+    startAtSeconds: 23.5,
   },
   project: {
     customerName: "Interior Pro",
