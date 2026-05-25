@@ -22,8 +22,11 @@ const defaultManifest: SalesPitchRenderManifest = {
   height: SALES_PITCH_HEIGHT,
   lengthProfile: "long",
   logo: {
-    position: "outro_center",
-    url: null,
+    cornerUrl: null,
+    outroBackgroundColor: "#ffffff",
+    outroFullFrame: false,
+    outroUrl: null,
+    position: "corner_and_outro",
   },
   outro: {
     blurDurationSeconds: 2.5,

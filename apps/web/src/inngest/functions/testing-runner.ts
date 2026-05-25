@@ -7,9 +7,11 @@ import {
   enhanceImageWithKieNanoBananaPro,
   generateVoiceoverAudio,
   getKieTaskRecord,
-  PIPELINE_MAX_RETRIES,
+  PIPELINE_MULTISHOT_STABILIZATION_ENABLED,
+  PIPELINE_MAX_IMAGE_RETRIES,
   PIPELINE_VALIDATOR_CASCADE_ENABLED,
   resizeForValidation,
+  reviewVideoVisualQuality,
   runMediaQcOnVideoBytes,
   stabilizeVideoBytes,
   validateOutput,
@@ -550,6 +552,60 @@ async function createSignedStorageUrl(
   return data.signedUrl;
 }
 
+function optionalString(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function optionalBoolean(value: unknown) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  }
+
+  return null;
+}
+
+async function loadTestingLogoContext(context: TestingRunContext) {
+  const cornerLogoStorageKey =
+    optionalString(context.config.cornerLogoStorageKey) ??
+    process.env.ADMIN_TEST_CORNER_LOGO_STORAGE_KEY ??
+    process.env.THELEN_SMALL_LOGO_STORAGE_KEY ??
+    null;
+  const outroLogoStorageKey =
+    optionalString(context.config.outroLogoStorageKey) ??
+    process.env.ADMIN_TEST_OUTRO_LOGO_STORAGE_KEY ??
+    process.env.THELEN_LARGE_LOGO_STORAGE_KEY ??
+    null;
+  const outroLogoBackgroundColor =
+    optionalString(context.config.outroLogoBackgroundColor) ??
+    process.env.ADMIN_TEST_OUTRO_LOGO_BACKGROUND_COLOR ??
+    "#2d3437";
+  const outroLogoFullFrame =
+    optionalBoolean(context.config.outroLogoFullFrame) ??
+    optionalBoolean(process.env.ADMIN_TEST_OUTRO_LOGO_FULL_FRAME) ??
+    false;
+
+  return {
+    cornerLogoSignedUrl: cornerLogoStorageKey
+      ? await createSignedStorageUrl(
+          STORAGE_BUCKETS.sourceAssets,
+          cornerLogoStorageKey,
+        )
+      : null,
+    outroLogoBackgroundColor,
+    outroLogoFullFrame,
+    outroLogoSignedUrl: outroLogoStorageKey
+      ? await createSignedStorageUrl(
+          STORAGE_BUCKETS.sourceAssets,
+          outroLogoStorageKey,
+        )
+      : null,
+  };
+}
+
 async function uploadTestingOutput({
   bucket,
   contentType,
@@ -744,7 +800,7 @@ async function runImageUpscaler(context: TestingRunContext) {
       model: AI_PROVIDERS.imageEnhancement.model,
       promptSource: promptOverride ? "override" : "upscaling",
       provider: AI_PROVIDERS.imageEnhancement.primary,
-      retryLimit: PIPELINE_MAX_RETRIES,
+      retryLimit: PIPELINE_MAX_IMAGE_RETRIES,
       targetResolution: "2K",
       validatorCascadeEnabled: PIPELINE_VALIDATOR_CASCADE_ENABLED,
     },
@@ -764,7 +820,7 @@ async function runImageUpscaler(context: TestingRunContext) {
     );
     const inputResized = await resizeForValidation(sourceImage);
 
-    for (let attempt = 1; attempt <= PIPELINE_MAX_RETRIES; attempt += 1) {
+    for (let attempt = 1; attempt <= PIPELINE_MAX_IMAGE_RETRIES; attempt += 1) {
       const result = await runWithTransientProviderRetry({
         label: `Image upscale ${index + 1} attempt ${attempt}`,
         operation: async () =>
@@ -808,6 +864,9 @@ async function runImageUpscaler(context: TestingRunContext) {
           decision: validatorResponse.result.overall_decision,
           failures: validatorResponse.result.critical_failures,
           geminiResult: validatorResponse.geminiResult as unknown as Json,
+          openaiResult: validatorResponse.openaiResult as unknown as Json,
+          primaryProvider: validatorResponse.primaryProvider,
+          providerResults: validatorResponse.providerResults as unknown as Json,
           taskId: result.taskId ?? null,
         },
         runId: context.run.id,
@@ -843,6 +902,9 @@ async function runImageUpscaler(context: TestingRunContext) {
             claudeResult: validatorResponse.claudeResult as unknown as Json,
             decision: validatorResponse.result.overall_decision,
             geminiResult: validatorResponse.geminiResult as unknown as Json,
+            openaiResult: validatorResponse.openaiResult as unknown as Json,
+            primaryProvider: validatorResponse.primaryProvider,
+            providerResults: validatorResponse.providerResults as unknown as Json,
           },
         },
         runId: context.run.id,
@@ -873,9 +935,9 @@ async function runImageUpscaler(context: TestingRunContext) {
     }
 
     await writeTestingLog({
-      message: `Image ${index + 1} dropped after ${PIPELINE_MAX_RETRIES} rejected validator attempt(s).`,
+      message: `Image ${index + 1} dropped after ${PIPELINE_MAX_IMAGE_RETRIES} rejected validator attempt(s).`,
       metadata: {
-        retryLimit: PIPELINE_MAX_RETRIES,
+        retryLimit: PIPELINE_MAX_IMAGE_RETRIES,
         sourceStorageKey: image.storage_key,
       },
       runId: context.run.id,
@@ -1318,7 +1380,11 @@ async function runKlingVideo(context: TestingRunContext) {
     let stabilizationApplied = false;
     let stabilizationError: string | null = null;
 
-    try {
+    if (
+      generationMode === "multi_shot" &&
+      PIPELINE_MULTISHOT_STABILIZATION_ENABLED
+    ) {
+      try {
       const stabilized = await stabilizeVideoBytes({
         clipStorageKey: clipJob.clipId,
         videoBytes,
@@ -1326,7 +1392,7 @@ async function runKlingVideo(context: TestingRunContext) {
       videoBytes = stabilized.videoBytes;
       contentType = "video/mp4";
       stabilizationApplied = stabilized.stabilized;
-    } catch (error) {
+      } catch (error) {
       stabilizationError =
         error instanceof Error ? error.message : "Unknown stabilization error.";
       await writeTestingLog({
@@ -1341,6 +1407,7 @@ async function runKlingVideo(context: TestingRunContext) {
         status: "info",
         step: "kling_video",
       });
+      }
     }
 
     const preflightQc = await runMediaQcOnVideoBytes({
@@ -1348,6 +1415,50 @@ async function runKlingVideo(context: TestingRunContext) {
       expectedDurationSeconds: durationSeconds,
       videoBytes,
     });
+
+    {
+      const sourceImage = await downloadAsset(image);
+      const visualReview = await reviewVideoVisualQuality({
+        sourceImage,
+        sourceMimeType: inferImageMimeType(
+          image.storage_key,
+          image.content_type,
+        ),
+        videoBytes,
+      });
+
+      await writeTestingLog({
+        message:
+          visualReview.status === "failed"
+            ? `Kling ${clipJob.clipId} failed visual review on attempt ${attempt}.`
+            : `Kling ${clipJob.clipId} visual review ${visualReview.status}.`,
+        metadata: {
+          attempt,
+          clipId: clipJob.clipId,
+          generationMode,
+          review: visualReview as unknown as Json,
+          taskId: task.taskId,
+        },
+        runId: context.run.id,
+        status:
+          visualReview.status === "failed"
+            ? "failed"
+            : visualReview.status === "skipped"
+            ? "info"
+            : "completed",
+        step: "kling_video",
+      });
+
+      if (visualReview.status === "failed") {
+        if (attempt < 2) {
+          continue;
+        }
+
+        throw new Error(
+          `Kling ${clipJob.clipId} failed visual review after ${attempt} attempt(s): ${visualReview.issues[0] ?? "unknown issue"}`,
+        );
+      }
+    }
 
     if (preflightQc.status !== "passed") {
       await writeTestingLog({
@@ -2076,11 +2187,15 @@ async function runRemotionRender(context: TestingRunContext) {
     }
 
     const music = await loadMusicContext(context);
+    const logoContext = await loadTestingLogoContext(context);
     manifest = buildSalesPitchRenderManifest({
       clipSignedUrls,
+      cornerLogoSignedUrl: logoContext.cornerLogoSignedUrl,
       editPlan: editorContext.finalEditPlan,
-      logoSignedUrl: null,
       musicSignedUrl: music.signedUrl,
+      outroLogoBackgroundColor: logoContext.outroLogoBackgroundColor,
+      outroLogoFullFrame: logoContext.outroLogoFullFrame,
+      outroLogoSignedUrl: logoContext.outroLogoSignedUrl,
       project: editorContext.project,
       voiceoverDurationSeconds,
       voiceoverSignedUrl,
@@ -2117,6 +2232,11 @@ async function runRemotionRender(context: TestingRunContext) {
   });
   const finalQcReport = await runMediaQcOnVideoBytes({
     clipStorageKey: output.storageKey,
+    expectedCutSeconds: manifest.scenes
+      .map((scene) => scene.startAtSeconds)
+      .filter(
+        (seconds) => seconds > 0 && seconds < manifest.outro.startAtSeconds,
+      ),
     expectedDurationSeconds: renderResult.durationSeconds,
     videoBytes: renderResult.outputBytes,
   });

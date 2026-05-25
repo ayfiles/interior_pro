@@ -10,3 +10,5 @@ coverage
 dev-server*.log
 *.tsbuildinfo
 supabase/.temp/
+.codex-artifacts/
+.codex-logs/

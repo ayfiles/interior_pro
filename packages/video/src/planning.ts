@@ -26,7 +26,10 @@ interface ProjectPlanningInput {
 interface BuildRenderManifestInput {
   clipSignedUrls: Map<string, string>;
   editPlan: FinalEditPlan;
-  logoSignedUrl?: string | null;
+  cornerLogoSignedUrl?: string | null;
+  outroLogoBackgroundColor?: string | null;
+  outroLogoFullFrame?: boolean | null;
+  outroLogoSignedUrl?: string | null;
   musicSignedUrl?: string | null;
   project: ProjectPlanningInput;
   voiceoverSignedUrl?: string | null;
@@ -658,8 +661,20 @@ function selectSegmentForTimelineScene({
             segment.clipStorageKey !== previousSegment.clipStorageKey &&
             segment.imageId !== previousSegment.imageId,
         );
+  const crossModeNonRepeatCandidates =
+    previousSegment === null || preferMultiShot
+      ? []
+      : fittingSegments.filter(
+          (segment) =>
+            segment.clipStorageKey !== previousSegment.clipStorageKey &&
+            segment.imageId !== previousSegment.imageId,
+        );
   const scoringCandidates =
-    nonRepeatCandidates.length > 0 ? nonRepeatCandidates : candidates;
+    nonRepeatCandidates.length > 0
+      ? nonRepeatCandidates
+      : crossModeNonRepeatCandidates.length > 0
+      ? crossModeNonRepeatCandidates
+      : candidates;
 
   return [...scoringCandidates].sort((a, b) => {
     const aUseCount = segmentUseCounts.get(a.id) ?? 0;
@@ -672,11 +687,11 @@ function selectSegmentForTimelineScene({
       }
 
       if (previousSegment?.clipStorageKey === segment.clipStorageKey) {
-        value += 8;
+        value += 80;
       }
 
       if (previousSegment?.imageId === segment.imageId) {
-        value += 4;
+        value += segment.isTaggedMultiShot ? 20 : 60;
       }
 
       value += Math.max(0, segment.durationSeconds - durationSeconds) * 0.1;
@@ -825,9 +840,12 @@ export function buildFinalEditPlan({
 
 export function buildSalesPitchRenderManifest({
   clipSignedUrls,
+  cornerLogoSignedUrl,
   editPlan,
-  logoSignedUrl,
   musicSignedUrl,
+  outroLogoBackgroundColor,
+  outroLogoFullFrame,
+  outroLogoSignedUrl,
   project,
   voiceoverDurationSeconds,
   voiceoverSignedUrl,
@@ -867,8 +885,11 @@ export function buildSalesPitchRenderManifest({
     height: SALES_PITCH_HEIGHT,
     lengthProfile: editPlan.lengthProfile,
     logo: {
-      position: "outro_center",
-      url: logoSignedUrl ?? null,
+      cornerUrl: cornerLogoSignedUrl ?? null,
+      outroBackgroundColor: outroLogoBackgroundColor ?? "#ffffff",
+      outroFullFrame: Boolean(outroLogoFullFrame),
+      outroUrl: outroLogoSignedUrl ?? null,
+      position: "corner_and_outro",
     },
     outro: editPlan.outro,
     project: {

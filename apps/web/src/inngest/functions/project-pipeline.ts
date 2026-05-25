@@ -15,9 +15,11 @@ import {
   getKieTaskRecord,
   PIPELINE_MAX_COST_PER_IMAGE,
   PIPELINE_MAX_COST_PER_JOB,
-  PIPELINE_MAX_RETRIES,
+  PIPELINE_MAX_IMAGE_RETRIES,
+  PIPELINE_MULTISHOT_STABILIZATION_ENABLED,
   PIPELINE_VALIDATOR_CASCADE_ENABLED,
   resizeForValidation,
+  reviewVideoVisualQuality,
   runMediaQcOnVideoBytes,
   stabilizeVideoBytes,
   type KlingModeClassificationResult,
@@ -127,6 +129,7 @@ type MediaQcClipInput = {
   multiShotVariant: ArchitecturalKlingMultiPromptVariant | null;
   orderIndex: number;
   promptType: KlingGenerationMode;
+  sourceImageStorageKey: string | null;
   tagSegmentsAsMultiShot: boolean;
   videoStatus: string;
 };
@@ -558,6 +561,7 @@ function buildFailedMediaQcReport({
       cutSimilarity: skippedCheck,
       freezeFrames: skippedCheck,
       resolution: skippedCheck,
+      visualReview: skippedCheck,
     },
     clipStorageKey,
     expectedDurationSeconds,
@@ -969,6 +973,56 @@ async function createSignedStorageUrl({
   return data.signedUrl;
 }
 
+function stringSetting(settings: Json | null | undefined, key: string) {
+  if (!isJsonObject(settings)) {
+    return null;
+  }
+
+  const value = settings[key];
+
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function booleanSetting(settings: Json | null | undefined, key: string) {
+  if (!isJsonObject(settings)) {
+    return null;
+  }
+
+  const value = settings[key];
+
+  return typeof value === "boolean" ? value : null;
+}
+
+function resolveLogoStorageKeys({
+  fallbackLogoStorageKey,
+  organizationSettings,
+}: {
+  fallbackLogoStorageKey?: string | null;
+  organizationSettings?: Json | null;
+}) {
+  const cornerLogoStorageKey =
+    stringSetting(organizationSettings, "cornerLogoStorageKey") ??
+    stringSetting(organizationSettings, "smallLogoStorageKey") ??
+    fallbackLogoStorageKey ??
+    null;
+  const outroLogoStorageKey =
+    stringSetting(organizationSettings, "outroLogoStorageKey") ??
+    stringSetting(organizationSettings, "largeLogoStorageKey") ??
+    fallbackLogoStorageKey ??
+    null;
+  const outroLogoBackgroundColor =
+    stringSetting(organizationSettings, "outroLogoBackgroundColor") ?? "#ffffff";
+  const outroLogoFullFrame =
+    booleanSetting(organizationSettings, "outroLogoFullFrame") ?? false;
+
+  return {
+    cornerLogoStorageKey,
+    outroLogoBackgroundColor,
+    outroLogoFullFrame,
+    outroLogoStorageKey,
+  };
+}
+
 export const projectPipeline = inngest.createFunction(
   {
     id: "project-pipeline",
@@ -1017,8 +1071,19 @@ export const projectPipeline = inngest.createFunction(
         throw reservationError;
       }
 
+      const { data: organization, error: organizationError } = await supabase
+        .from("organizations")
+        .select("settings")
+        .eq("id", organizationId)
+        .single();
+
+      if (organizationError) {
+        throw organizationError;
+      }
+
       return {
         images: images ?? [],
+        organization,
         project,
         reservation,
       };
@@ -1228,7 +1293,7 @@ export const projectPipeline = inngest.createFunction(
         model: AI_PROVIDERS.imageEnhancement.model,
         maxCostPerImage: PIPELINE_MAX_COST_PER_IMAGE,
         maxCostPerJob: PIPELINE_MAX_COST_PER_JOB,
-        maxRetries: PIPELINE_MAX_RETRIES,
+        maxRetries: PIPELINE_MAX_IMAGE_RETRIES,
         provider: AI_PROVIDERS.imageEnhancement.primary,
         promptPath: UPSCALING_PROMPT_PATH,
         targetResolution: "2K",
@@ -1346,7 +1411,7 @@ export const projectPipeline = inngest.createFunction(
             } | null = null;
             let dropReason: string | null = null;
 
-            for (let attempt = 1; attempt <= PIPELINE_MAX_RETRIES; attempt += 1) {
+            for (let attempt = 1; attempt <= PIPELINE_MAX_IMAGE_RETRIES; attempt += 1) {
               if (costSoFar >= PIPELINE_MAX_COST_PER_IMAGE) {
                 dropReason = "cost_cap_exceeded";
                 break;
@@ -1490,6 +1555,9 @@ export const projectPipeline = inngest.createFunction(
                   decision: validatorResponse.result.overall_decision,
                   estimatedCostUsd: validationCost,
                   geminiResult: validatorResponse.geminiResult as unknown as Json,
+                  openaiResult: validatorResponse.openaiResult as unknown as Json,
+                  primaryProvider: validatorResponse.primaryProvider,
+                  providerResults: validatorResponse.providerResults as unknown as Json,
                 },
               };
 
@@ -2511,7 +2579,11 @@ export const projectPipeline = inngest.createFunction(
             let stabilizationApplied = false;
             let stabilizationError: string | null = null;
 
-            try {
+            if (
+              activeTask.generationMode === "multi_shot" &&
+              PIPELINE_MULTISHOT_STABILIZATION_ENABLED
+            ) {
+              try {
               const stabilized = await stabilizeVideoBytes({
                 clipStorageKey: activeTask.clipStorageKey,
                 videoBytes: clipBytes,
@@ -2519,7 +2591,7 @@ export const projectPipeline = inngest.createFunction(
               clipBytes = stabilized.videoBytes;
               contentType = "video/mp4";
               stabilizationApplied = stabilized.stabilized;
-            } catch (error) {
+              } catch (error) {
               stabilizationError = getErrorMessage(error);
               await writePipelineLog({
                 message:
@@ -2535,6 +2607,7 @@ export const projectPipeline = inngest.createFunction(
                 status: "info",
                 step: "video_generation",
               });
+              }
             }
 
             const { error: uploadError } = await supabase.storage
@@ -2770,6 +2843,7 @@ export const projectPipeline = inngest.createFunction(
             multiShotVariant,
             orderIndex: image.order_index,
             promptType: generationMode,
+            sourceImageStorageKey: image.upscaled_storage_key,
             tagSegmentsAsMultiShot:
               shouldTagSegmentsAsMultiShot(multiShotVariant),
             videoStatus: image.video_status,
@@ -2806,6 +2880,7 @@ export const projectPipeline = inngest.createFunction(
           orderIndex: image.order_index,
           promptType:
             image.prompt_type === "multi_shot" ? "multi_shot" : "single_shot",
+          sourceImageStorageKey: image.upscaled_storage_key,
           tagSegmentsAsMultiShot: image.prompt_type === "multi_shot",
           videoStatus: image.video_status,
         }));
@@ -2934,6 +3009,76 @@ export const projectPipeline = inngest.createFunction(
               expectedDurationSeconds,
               videoBytes: clipBytes,
             });
+
+            if (report.status === "passed") {
+              if (!image.sourceImageStorageKey) {
+                report = {
+                  ...report,
+                  checks: {
+                    ...report.checks,
+                    visualReview: {
+                      message:
+                        "Video visual review could not run because the source image is missing.",
+                      status: "failed",
+                    },
+                  },
+                  issues: [
+                    ...report.issues,
+                    "Video visual review source image is missing.",
+                  ],
+                  status: "failed",
+                };
+              } else {
+                const { data: sourceFile, error: sourceDownloadError } =
+                  await supabase.storage
+                    .from(STORAGE_BUCKETS.sourceAssets)
+                    .download(image.sourceImageStorageKey);
+
+                if (sourceDownloadError) {
+                  throw sourceDownloadError;
+                }
+
+                const review = await reviewVideoVisualQuality({
+                  sourceImage: new Uint8Array(await sourceFile.arrayBuffer()),
+                  sourceMimeType:
+                    sourceFile.type || inferImageMimeType(image.sourceImageStorageKey),
+                  videoBytes: clipBytes,
+                });
+
+                if (review.status === "failed") {
+                  report = {
+                  ...report,
+                  checks: {
+                    ...report.checks,
+                    visualReview: {
+                      message: `Video visual review failed: ${review.issues.join(", ") || review.notes}`,
+                      status: "failed",
+                    },
+                    },
+                    issues: [
+                      ...report.issues,
+                      `Video visual review failed: ${review.issues.join(", ") || review.notes}`,
+                    ],
+                    metrics: {
+                      ...report.metrics,
+                      sceneChangeSeconds: report.metrics.sceneChangeSeconds,
+                    },
+                    status: "failed",
+                  };
+                }
+
+                report = {
+                  ...report,
+                  metrics: {
+                    ...report.metrics,
+                  },
+                  warnings:
+                    review.status === "skipped"
+                      ? [...report.warnings, `Video visual review skipped: ${review.notes}`]
+                      : report.warnings,
+                };
+              }
+            }
           } catch (error) {
             report = buildFailedMediaQcReport({
               clipStorageKey,
@@ -3475,18 +3620,32 @@ export const projectPipeline = inngest.createFunction(
             storageKey: musicContext.storageKey,
           })
         : null;
-      const logoSignedUrl = context.project.customer_logo_storage_key
+      const logoStorage = resolveLogoStorageKeys({
+        fallbackLogoStorageKey: context.project.customer_logo_storage_key,
+        organizationSettings: context.organization.settings,
+      });
+      const cornerLogoSignedUrl = logoStorage.cornerLogoStorageKey
         ? await createSignedStorageUrl({
             bucket: STORAGE_BUCKETS.sourceAssets,
             expiresInSeconds: 60 * 60,
-            storageKey: context.project.customer_logo_storage_key,
+            storageKey: logoStorage.cornerLogoStorageKey,
+          })
+        : null;
+      const outroLogoSignedUrl = logoStorage.outroLogoStorageKey
+        ? await createSignedStorageUrl({
+            bucket: STORAGE_BUCKETS.sourceAssets,
+            expiresInSeconds: 60 * 60,
+            storageKey: logoStorage.outroLogoStorageKey,
           })
         : null;
       const manifest = buildSalesPitchRenderManifest({
         clipSignedUrls,
+        cornerLogoSignedUrl,
         editPlan: finalEditPlan,
-        logoSignedUrl,
         musicSignedUrl,
+        outroLogoBackgroundColor: logoStorage.outroLogoBackgroundColor,
+        outroLogoFullFrame: logoStorage.outroLogoFullFrame,
+        outroLogoSignedUrl,
         project: projectPlanningInput,
         voiceoverDurationSeconds: voiceoverAsset.durationSeconds,
         voiceoverSignedUrl,
@@ -3634,6 +3793,13 @@ export const projectPipeline = inngest.createFunction(
 
       return runMediaQcOnVideoBytes({
         clipStorageKey: renderedVideo.storageKey,
+        expectedCutSeconds: renderManifest.manifest.scenes
+          .map((scene) => scene.startAtSeconds)
+          .filter(
+            (seconds) =>
+              seconds > 0 &&
+              seconds < renderManifest.manifest.outro.startAtSeconds,
+          ),
         expectedDurationSeconds: renderManifest.manifest.durationSeconds,
         videoBytes: new Uint8Array(await finalVideo.arrayBuffer()),
       });

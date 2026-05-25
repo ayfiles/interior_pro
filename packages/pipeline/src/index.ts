@@ -4,4 +4,5 @@ export * from "./services/media-qc";
 export * from "./services/pipeline-constants";
 export * from "./services/runway";
 export * from "./services/validator";
+export * from "./services/video-validator";
 export * from "./services/voiceover";

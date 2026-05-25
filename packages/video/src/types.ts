@@ -153,8 +153,11 @@ export interface SalesPitchRenderManifest {
   height: number;
   lengthProfile: VideoLengthProfile;
   logo: {
-    position: "outro_center";
-    url: string | null;
+    cornerUrl: string | null;
+    outroBackgroundColor: string;
+    outroFullFrame: boolean;
+    outroUrl: string | null;
+    position: "corner_and_outro";
   };
   outro: FinalEditPlan["outro"];
   project: {

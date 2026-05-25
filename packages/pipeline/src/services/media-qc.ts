@@ -45,6 +45,7 @@ export interface MediaQcReport {
     cutSimilarity: MediaQcCheck;
     freezeFrames: MediaQcCheck;
     resolution: MediaQcCheck;
+    visualReview: MediaQcCheck;
   };
   clipStorageKey: string;
   expectedDurationSeconds: number | null;
@@ -469,6 +470,135 @@ async function detectSceneChanges(filePath: string) {
   return parseSceneChangeSeconds(stderr.toString("utf8"));
 }
 
+async function extractRgbFrame(filePath: string, seconds: number) {
+  const frameSize = CUT_SAMPLE_WIDTH * CUT_SAMPLE_HEIGHT * 3;
+  const { stdout } = await runCommand(
+    getFfmpegPath(),
+    [
+      "-hide_banner",
+      "-nostdin",
+      "-loglevel",
+      "error",
+      "-ss",
+      seconds.toFixed(3),
+      "-i",
+      filePath,
+      "-frames:v",
+      "1",
+      "-vf",
+      `scale=${CUT_SAMPLE_WIDTH}:${CUT_SAMPLE_HEIGHT},format=rgb24`,
+      "-f",
+      "rawvideo",
+      "pipe:1",
+    ],
+    {
+      maxBufferBytes: frameSize + 1024,
+      timeoutMs: 20_000,
+    },
+  );
+
+  return stdout.byteLength >= frameSize ? stdout.subarray(0, frameSize) : null;
+}
+
+function buildLumaHistogram(frame: Buffer) {
+  const bins = Array.from({ length: 16 }, () => 0);
+  const pixels = Math.max(1, frame.byteLength / 3);
+
+  for (let index = 0; index + 2 < frame.byteLength; index += 3) {
+    const r = frame[index] ?? 0;
+    const g = frame[index + 1] ?? 0;
+    const b = frame[index + 2] ?? 0;
+    const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const bin = Math.min(15, Math.max(0, Math.floor(luma / 16)));
+
+    bins[bin] += 1 / pixels;
+  }
+
+  return bins;
+}
+
+function compareFrameSamples(before: Buffer, after: Buffer) {
+  const length = Math.min(before.byteLength, after.byteLength);
+  let absolutePixelDifference = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    absolutePixelDifference += Math.abs((before[index] ?? 0) - (after[index] ?? 0));
+  }
+
+  const beforeHistogram = buildLumaHistogram(before);
+  const afterHistogram = buildLumaHistogram(after);
+  const histogramDifference =
+    beforeHistogram.reduce(
+      (sum, value, index) => sum + Math.abs(value - (afterHistogram[index] ?? 0)),
+      0,
+    ) / beforeHistogram.length;
+
+  return {
+    histogramDifference: Number(histogramDifference.toFixed(5)),
+    pixelDifference: Number(
+      (absolutePixelDifference / Math.max(1, length * 255)).toFixed(5),
+    ),
+  };
+}
+
+async function detectNearDuplicateCuts({
+  durationSeconds,
+  expectedCutSeconds,
+  filePath,
+}: {
+  durationSeconds: number | null;
+  expectedCutSeconds: number[] | null;
+  filePath: string;
+}) {
+  if (!durationSeconds || !expectedCutSeconds?.length) {
+    return [];
+  }
+
+  const cutSeconds = Array.from(
+    new Set(
+      expectedCutSeconds
+        .filter((seconds) => Number.isFinite(seconds))
+        .map((seconds) => Math.round(seconds * 1000) / 1000)
+        .filter(
+          (seconds) =>
+            seconds > CUT_SAMPLE_OFFSET_SECONDS &&
+            seconds < durationSeconds - CUT_SAMPLE_OFFSET_SECONDS,
+        ),
+    ),
+  ).sort((a, b) => a - b);
+  const matches: MediaQcReport["metrics"]["nearDuplicateCutSeconds"] = [];
+
+  for (const seconds of cutSeconds) {
+    const [before, after] = await Promise.all([
+      extractRgbFrame(filePath, seconds - CUT_SAMPLE_OFFSET_SECONDS).catch(
+        () => null,
+      ),
+      extractRgbFrame(filePath, seconds + CUT_SAMPLE_OFFSET_SECONDS).catch(
+        () => null,
+      ),
+    ]);
+
+    if (!before || !after) {
+      continue;
+    }
+
+    const comparison = compareFrameSamples(before, after);
+
+    if (
+      comparison.pixelDifference < CUT_PIXEL_DIFF_FAIL &&
+      comparison.histogramDifference < CUT_HISTOGRAM_DIFF_FAIL
+    ) {
+      matches.push({
+        histogramDifference: comparison.histogramDifference,
+        pixelDifference: comparison.pixelDifference,
+        seconds,
+      });
+    }
+  }
+
+  return matches;
+}
+
 async function estimateBlurScores({
   filePath,
   height,
@@ -568,6 +698,7 @@ async function inspectVideoFile({
     freezeSegments,
     sceneChangeSeconds,
     blurFrameScores,
+    nearDuplicateCutSeconds,
   ] = await Promise.all([
     detectBlackFrames(filePath),
     detectFreezeFrames(filePath),
@@ -575,6 +706,11 @@ async function inspectVideoFile({
     width && height
       ? estimateBlurScores({ filePath, height, width }).catch(() => [])
       : Promise.resolve([]),
+    detectNearDuplicateCuts({
+      durationSeconds,
+      expectedCutSeconds,
+      filePath,
+    }).catch(() => []),
   ]);
   const totalBlackSeconds = blackSegments.reduce(
     (sum, segment) => sum + segment.durationSeconds,
@@ -595,7 +731,6 @@ async function inspectVideoFile({
   const blurMedianScore = median(blurFrameScores);
   const durationThreshold = getDurationThreshold(expectedDurationSeconds);
   const expectedCutCount = expectedCutSeconds?.length ?? 0;
-  const nearDuplicateCutSeconds: MediaQcReport["metrics"]["nearDuplicateCutSeconds"] = [];
   const checks = {
     bitrate: buildCheck(
       bitRateBitsPerSecond === null,
@@ -647,10 +782,17 @@ async function inspectVideoFile({
     ),
     cutSimilarity: {
       message:
-        expectedCutCount > 0
-          ? `Cut similarity check skipped for ${expectedCutCount} expected cuts.`
+        expectedCutCount > 0 && nearDuplicateCutSeconds.length > 0
+          ? `Detected ${nearDuplicateCutSeconds.length} near-duplicate cut boundary frame pair(s).`
+          : expectedCutCount > 0
+          ? `Checked ${expectedCutCount} expected cut boundary frame pair(s).`
           : "Cut similarity check skipped; no expected cut timings provided.",
-      status: "skipped",
+      status:
+        expectedCutCount === 0
+          ? "skipped"
+          : nearDuplicateCutSeconds.length > 0
+          ? "failed"
+          : "passed",
     },
     freezeFrames: buildCheck(
       Boolean(
@@ -675,6 +817,10 @@ async function inspectVideoFile({
         ? `Resolution is ${width}x${height}.`
         : "Resolution could not be read.",
     ),
+    visualReview: {
+      message: "Semantic visual review is handled by the pipeline stage.",
+      status: "skipped",
+    },
   } satisfies MediaQcReport["checks"];
   const { issues, warnings } = collectMessages(checks);
 

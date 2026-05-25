@@ -195,7 +195,7 @@ function OutroOverlay({ manifest }: { manifest: SalesPitchRenderManifest }) {
     [0, 1],
     { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
   );
-  const logoOpacity = manifest.logo.url
+  const logoOpacity = manifest.logo.outroUrl
     ? interpolate(
         frame,
         [logoStartFrame, logoStartFrame + logoFadeFrames],
@@ -203,7 +203,7 @@ function OutroOverlay({ manifest }: { manifest: SalesPitchRenderManifest }) {
         { extrapolateLeft: "clamp", extrapolateRight: "clamp" },
       )
     : 0;
-  const logoBlur = manifest.logo.url
+  const logoBlur = manifest.logo.outroUrl
     ? interpolate(
         frame,
         [logoStartFrame, logoStartFrame + logoFadeFrames],
@@ -216,24 +216,53 @@ function OutroOverlay({ manifest }: { manifest: SalesPitchRenderManifest }) {
     <AbsoluteFill
       style={{
         alignItems: "center",
-        backgroundColor: `rgba(255, 255, 255, ${whiteOpacity})`,
+        backgroundColor: manifest.logo.outroBackgroundColor,
         justifyContent: "center",
-        opacity: frame < startFrame ? 0 : 1,
+        opacity: frame < startFrame ? 0 : whiteOpacity,
         pointerEvents: "none",
       }}
     >
-      {manifest.logo.url ? (
+      {manifest.logo.outroUrl ? (
         <Img
-          src={manifest.logo.url}
+          src={manifest.logo.outroUrl}
           style={{
             filter: `blur(${logoBlur}px)`,
-            maxHeight: 190,
-            maxWidth: 520,
+            height: manifest.logo.outroFullFrame ? "100%" : undefined,
+            maxHeight: manifest.logo.outroFullFrame ? undefined : 190,
+            maxWidth: manifest.logo.outroFullFrame ? undefined : 520,
             objectFit: "contain",
             opacity: logoOpacity,
+            width: manifest.logo.outroFullFrame ? "100%" : undefined,
           }}
         />
       ) : null}
+    </AbsoluteFill>
+  );
+}
+
+function CornerLogo({ manifest }: { manifest: SalesPitchRenderManifest }) {
+  if (!manifest.logo.cornerUrl) {
+    return null;
+  }
+
+  return (
+    <AbsoluteFill
+      style={{
+        alignItems: "flex-end",
+        justifyContent: "flex-end",
+        padding: 44,
+        pointerEvents: "none",
+      }}
+    >
+      <Img
+        src={manifest.logo.cornerUrl}
+        style={{
+          maxHeight: 76,
+          maxWidth: 190,
+          objectFit: "contain",
+          opacity: 0.92,
+        }}
+      />
     </AbsoluteFill>
   );
 }
@@ -261,6 +290,7 @@ function SalesPitchContent({
     <>
       <SceneLayer manifest={manifest} />
       <SceneBoundaryGuard manifest={manifest} />
+      <CornerLogo manifest={manifest} />
       <OutroOverlay manifest={manifest} />
       <MusicTrack manifest={manifest} />
       <VoiceoverTrack manifest={manifest} />

@@ -8,6 +8,7 @@ import {
   LogOut,
   Play,
   Plus,
+  Settings,
   ShieldCheck,
   Sparkles,
   Upload,
@@ -160,6 +161,13 @@ export function DashboardShell({
               >
                 New film
                 <Plus className="size-4" />
+              </Link>
+              <Link
+                className="mt-2 flex h-10 items-center justify-between rounded-md px-3 text-sm text-[var(--muted)] hover:bg-white/5 hover:text-[var(--foreground)]"
+                href="/account/settings"
+              >
+                Logos
+                <Settings className="size-4" />
               </Link>
             </nav>
 

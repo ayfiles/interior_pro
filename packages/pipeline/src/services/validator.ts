@@ -3,12 +3,30 @@ import sharp from "sharp";
 import { z } from "zod";
 import { PIPELINE_VALIDATION_IMAGE_SIZE } from "./pipeline-constants";
 
+type ImageValidatorProvider = "claude" | "gemini" | "openai";
+
+const OPENAI_VALIDATOR_COST_USD = 0.012;
 const GEMINI_VALIDATOR_COST_USD = 0.005;
 const CLAUDE_VALIDATOR_COST_USD = 0.01;
+const OPENAI_VALIDATOR_MODEL =
+  process.env.OPENAI_IMAGE_VALIDATOR_MODEL ?? "gpt-5.5";
 const GEMINI_VALIDATOR_MODEL =
   process.env.GEMINI_IMAGE_ANALYSIS_MODEL ?? "gemini-2.5-pro";
-const CLAUDE_VALIDATOR_MODEL = "claude-sonnet-4-6";
+const CLAUDE_VALIDATOR_MODEL =
+  process.env.CLAUDE_VALIDATOR_MODEL ?? "claude-sonnet-4-6";
 const KIE_API_BASE_URL = process.env.KIE_API_BASE_URL ?? "https://api.kie.ai";
+const PRIMARY_IMAGE_VALIDATOR = normalizePrimaryValidator(
+  process.env.PIPELINE_IMAGE_VALIDATOR_PRIMARY,
+);
+const HIGH_CONFIDENCE_FAILURE_THRESHOLD = 0.7;
+const VALIDATOR_POLICY_INSERT = [
+  "ADDITIONAL NON-GENERATION QC POLICY:",
+  "This policy is for validation only. It must not be treated as an image-generation prompt.",
+  "Reject creative expansion: the output may look more polished, but it must not reveal wider room area, add side extensions, add new decor, or invent new furniture, lamps, rugs, blankets, cushions, props, art, plants, doors, windows, views, or architectural parts.",
+  "Reject material hallucinations: fur, sheepskin, fleece, shag, hair-like texture, brown hide, blanket-like throws, or furry rugs are FAIL unless the same material is clearly visible in the input at the same location.",
+  "Reject object hallucinations: new floor lamps, pendant lamps, table lamps, light strips, ceiling fixtures, or side-entering objects are FAIL unless clearly present in the input.",
+  "If a high-impact material or object identity change is plausible but uncertain, prefer REJECT over ACCEPT. Do not reject small lighting, exposure, or photographic style changes when object identity is preserved.",
+].join("\n");
 
 export const ValidatorResultSchema = z.object({
   room_proportions: z.enum(["PASS", "FAIL"]),
@@ -39,14 +57,30 @@ export interface ValidateOutputInput {
   outputMimeType: string;
 }
 
+interface ValidatorRun {
+  estimatedCostUsd: number;
+  model: string;
+  provider: ImageValidatorProvider;
+  rawText: string;
+  result: ValidatorResult | null;
+}
+
 export interface ValidateOutputResult {
   result: ValidatorResult;
   geminiResult: ValidatorResult;
   claudeResult: ValidatorResult | null;
+  openaiResult: ValidatorResult | null;
   estimatedCostUsd: number;
   geminiRawText: string;
   claudeRawText: string | null;
+  openaiRawText: string | null;
   cascadeRan: boolean;
+  providerResults: Array<{
+    model: string;
+    provider: ImageValidatorProvider;
+    result: ValidatorResult | null;
+  }>;
+  primaryProvider: ImageValidatorProvider;
 }
 
 interface KieOpenAiChatResponse {
@@ -77,53 +111,77 @@ interface KieClaudeResponse {
   msg?: string;
 }
 
+interface OpenAiResponsesResponse {
+  error?: {
+    message?: string;
+  };
+  output?: Array<{
+    content?: Array<{
+      text?: string;
+      type?: string;
+    }>;
+  }>;
+  output_text?: string;
+}
+
+const VALIDATOR_JSON_SCHEMA = {
+  additionalProperties: false,
+  properties: {
+    confidence: { maximum: 1, minimum: 0, type: "number" },
+    critical_failures: { items: { type: "string" }, type: "array" },
+    lighting_state: { enum: ["PASS", "FAIL"], type: "string" },
+    lighting_state_notes: { type: "string" },
+    main_colors: { enum: ["PASS", "FAIL"], type: "string" },
+    main_colors_notes: { type: "string" },
+    materials: { enum: ["PASS", "FAIL"], type: "string" },
+    materials_notes: { type: "string" },
+    objects: { enum: ["PASS", "FAIL"], type: "string" },
+    objects_notes: { type: "string" },
+    overall_decision: {
+      enum: ["ACCEPT", "ACCEPT_WITH_WARNING", "REJECT"],
+      type: "string",
+    },
+    room_proportions: { enum: ["PASS", "FAIL"], type: "string" },
+    room_proportions_notes: { type: "string" },
+    window_content: { enum: ["PASS", "FAIL"], type: "string" },
+    window_content_notes: { type: "string" },
+  },
+  required: [
+    "room_proportions",
+    "room_proportions_notes",
+    "main_colors",
+    "main_colors_notes",
+    "materials",
+    "materials_notes",
+    "objects",
+    "objects_notes",
+    "window_content",
+    "window_content_notes",
+    "lighting_state",
+    "lighting_state_notes",
+    "overall_decision",
+    "critical_failures",
+    "confidence",
+  ],
+  type: "object",
+} as const;
+
 const VALIDATOR_RESPONSE_FORMAT = {
   json_schema: {
     name: "pipeline_validator_result",
-    schema: {
-      additionalProperties: false,
-      properties: {
-        confidence: { maximum: 1, minimum: 0, type: "number" },
-        critical_failures: { items: { type: "string" }, type: "array" },
-        lighting_state: { enum: ["PASS", "FAIL"], type: "string" },
-        lighting_state_notes: { type: "string" },
-        main_colors: { enum: ["PASS", "FAIL"], type: "string" },
-        main_colors_notes: { type: "string" },
-        materials: { enum: ["PASS", "FAIL"], type: "string" },
-        materials_notes: { type: "string" },
-        objects: { enum: ["PASS", "FAIL"], type: "string" },
-        objects_notes: { type: "string" },
-        overall_decision: {
-          enum: ["ACCEPT", "ACCEPT_WITH_WARNING", "REJECT"],
-          type: "string",
-        },
-        room_proportions: { enum: ["PASS", "FAIL"], type: "string" },
-        room_proportions_notes: { type: "string" },
-        window_content: { enum: ["PASS", "FAIL"], type: "string" },
-        window_content_notes: { type: "string" },
-      },
-      required: [
-        "room_proportions",
-        "room_proportions_notes",
-        "main_colors",
-        "main_colors_notes",
-        "materials",
-        "materials_notes",
-        "objects",
-        "objects_notes",
-        "window_content",
-        "window_content_notes",
-        "lighting_state",
-        "lighting_state_notes",
-        "overall_decision",
-        "critical_failures",
-        "confidence",
-      ],
-      type: "object",
-    },
+    schema: VALIDATOR_JSON_SCHEMA,
     strict: true,
   },
   type: "json_schema",
+} as const;
+
+const OPENAI_TEXT_FORMAT = {
+  format: {
+    name: "pipeline_validator_result",
+    schema: VALIDATOR_JSON_SCHEMA,
+    strict: true,
+    type: "json_schema",
+  },
 } as const;
 
 export async function resizeForValidation(
@@ -149,60 +207,162 @@ export async function resizeForValidation(
 export async function validateOutput(
   input: ValidateOutputInput,
 ): Promise<ValidateOutputResult> {
-  const gemini = await runGeminiValidator(input);
-  const baseCost = GEMINI_VALIDATOR_COST_USD;
+  const primaryProvider = resolvePrimaryValidator();
+  const runs: ValidatorRun[] = [await runValidator(primaryProvider, input)];
 
-  if (!input.cascadeEnabled || gemini.result.overall_decision === "REJECT") {
-    return {
-      cascadeRan: false,
-      claudeRawText: null,
-      claudeResult: null,
-      estimatedCostUsd: baseCost,
-      geminiRawText: gemini.rawText,
-      geminiResult: gemini.result,
-      result: gemini.result,
-    };
+  if (input.cascadeEnabled) {
+    const secondaryProvider =
+      primaryProvider === "openai" ? "gemini" : "claude";
+    runs.push(await runValidator(secondaryProvider, input));
   }
 
-  const claude = await runClaudeValidator(input);
-
-  if (!claude.result) {
-    const fallbackResult = appendCriticalFailure(
-      gemini.result,
-      "claude_parse_error",
-    );
-
-    return {
-      cascadeRan: true,
-      claudeRawText: claude.rawText,
-      claudeResult: null,
-      estimatedCostUsd: baseCost + CLAUDE_VALIDATOR_COST_USD,
-      geminiRawText: gemini.rawText,
-      geminiResult: gemini.result,
-      result: fallbackResult,
-    };
-  }
+  const finalResult = mergeValidatorRuns(runs);
+  const geminiRun = runs.find((run) => run.provider === "gemini");
+  const claudeRun = runs.find((run) => run.provider === "claude");
+  const openaiRun = runs.find((run) => run.provider === "openai");
+  const fallbackGeminiResult =
+    geminiRun?.result ?? runs.find((run) => run.result)?.result ?? finalResult;
 
   return {
-    cascadeRan: true,
-    claudeRawText: claude.rawText,
-    claudeResult: claude.result,
-    estimatedCostUsd: baseCost + CLAUDE_VALIDATOR_COST_USD,
-    geminiRawText: gemini.rawText,
-    geminiResult: gemini.result,
-    result: claude.result,
+    cascadeRan: runs.length > 1,
+    claudeRawText: claudeRun?.rawText ?? null,
+    claudeResult: claudeRun?.result ?? null,
+    estimatedCostUsd: runs.reduce((sum, run) => sum + run.estimatedCostUsd, 0),
+    geminiRawText: geminiRun?.rawText ?? "",
+    geminiResult: fallbackGeminiResult,
+    openaiRawText: openaiRun?.rawText ?? null,
+    openaiResult: openaiRun?.result ?? null,
+    primaryProvider,
+    providerResults: runs.map((run) => ({
+      model: run.model,
+      provider: run.provider,
+      result: run.result,
+    })),
+    result: finalResult,
   };
 }
 
-async function runGeminiValidator(input: ValidateOutputInput): Promise<{
-  rawText: string;
-  result: ValidatorResult;
-}> {
+async function runValidator(
+  provider: ImageValidatorProvider,
+  input: ValidateOutputInput,
+): Promise<ValidatorRun> {
+  if (provider === "openai") {
+    return runOpenAiValidator(input);
+  }
+
+  if (provider === "claude") {
+    return runClaudeValidator(input);
+  }
+
+  return runGeminiValidator(input);
+}
+
+async function runOpenAiValidator(input: ValidateOutputInput): Promise<ValidatorRun> {
+  const apiKey = process.env.OPENAI_API_KEY?.trim();
+
+  if (!apiKey) {
+    return {
+      estimatedCostUsd: 0,
+      model: OPENAI_VALIDATOR_MODEL,
+      provider: "openai",
+      rawText: "OPENAI_API_KEY is required for OpenAI image validation.",
+      result: buildRejectResult({
+        failure: "openai_validator_error",
+        notes: "OPENAI_API_KEY is missing.",
+      }),
+    };
+  }
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      body: JSON.stringify({
+        input: [
+          {
+            content: [
+              {
+                text: buildValidatorPrompt(input.prompt),
+                type: "input_text",
+              },
+              {
+                image_url: toDataUrl(input.inputImage, input.inputMimeType),
+                type: "input_image",
+              },
+              {
+                text: "OUTPUT_IMAGE:",
+                type: "input_text",
+              },
+              {
+                image_url: toDataUrl(input.outputImage, input.outputMimeType),
+                type: "input_image",
+              },
+            ],
+            role: "user",
+          },
+        ],
+        model: OPENAI_VALIDATOR_MODEL,
+        temperature: 0,
+        text: OPENAI_TEXT_FORMAT,
+      }),
+      headers: {
+        Authorization: toBearerToken(apiKey),
+        "Content-Type": "application/json",
+      },
+      method: "POST",
+    });
+    const json = (await response.json()) as OpenAiResponsesResponse;
+
+    if (!response.ok) {
+      const message = `OpenAI image validator failed (${response.status}): ${
+        json.error?.message ?? response.statusText
+      }`;
+
+      return {
+        estimatedCostUsd: OPENAI_VALIDATOR_COST_USD,
+        model: OPENAI_VALIDATOR_MODEL,
+        provider: "openai",
+        rawText: message,
+        result: buildRejectResult({
+          failure: "openai_validator_error",
+          notes: message,
+        }),
+      };
+    }
+
+    const rawText = extractOpenAiText(json);
+    const parsed = parseValidatorText(rawText);
+
+    return {
+      estimatedCostUsd: OPENAI_VALIDATOR_COST_USD,
+      model: OPENAI_VALIDATOR_MODEL,
+      provider: "openai",
+      rawText,
+      result: parsed,
+    };
+  } catch (error) {
+    const message = getErrorMessage(error);
+
+    return {
+      estimatedCostUsd: OPENAI_VALIDATOR_COST_USD,
+      model: OPENAI_VALIDATOR_MODEL,
+      provider: "openai",
+      rawText: message,
+      result: buildRejectResult({
+        failure: "openai_validator_error",
+        notes: message,
+      }),
+    };
+  }
+}
+
+async function runGeminiValidator(input: ValidateOutputInput): Promise<ValidatorRun> {
   const apiKey = getKieApiKey();
 
   if (!apiKey) {
     return {
-      rawText: "KIE_API_KEY is required for Stage 1 validation.",
+      estimatedCostUsd: 0,
+      model: GEMINI_VALIDATOR_MODEL,
+      provider: "gemini",
+      rawText: "KIE_API_KEY is required for Gemini validation.",
       result: buildRejectResult({
         failure: "gemini_validator_error",
         notes: "KIE_API_KEY is missing.",
@@ -219,7 +379,7 @@ async function runGeminiValidator(input: ValidateOutputInput): Promise<{
             {
               content: [
                 {
-                  text: `${input.prompt}\n\nINPUT_IMAGE:`,
+                  text: `${buildValidatorPrompt(input.prompt)}\n\nINPUT_IMAGE:`,
                   type: "text",
                 },
                 {
@@ -262,6 +422,9 @@ async function runGeminiValidator(input: ValidateOutputInput): Promise<{
       }`;
 
       return {
+        estimatedCostUsd: GEMINI_VALIDATOR_COST_USD,
+        model: GEMINI_VALIDATOR_MODEL,
+        provider: "gemini",
         rawText: message,
         result: buildRejectResult({
           failure: "gemini_validator_error",
@@ -272,36 +435,20 @@ async function runGeminiValidator(input: ValidateOutputInput): Promise<{
 
     const rawText = json.choices?.[0]?.message?.content?.trim() ?? "";
 
-    if (!rawText) {
-      return {
-        rawText,
-        result: buildRejectResult({
-          failure: "gemini_parse_error",
-          notes: "KIE Gemini validator did not return JSON text.",
-        }),
-      };
-    }
-
-    const parsed = ValidatorResultSchema.safeParse(parseJsonResponse(rawText));
-
-    if (!parsed.success) {
-      return {
-        rawText,
-        result: buildRejectResult({
-          failure: "gemini_parse_error",
-          notes: `KIE Gemini validator returned invalid JSON: ${parsed.error.message}`,
-        }),
-      };
-    }
-
     return {
+      estimatedCostUsd: GEMINI_VALIDATOR_COST_USD,
+      model: GEMINI_VALIDATOR_MODEL,
+      provider: "gemini",
       rawText,
-      result: parsed.data,
+      result: parseValidatorText(rawText),
     };
   } catch (error) {
     const message = getErrorMessage(error);
 
     return {
+      estimatedCostUsd: GEMINI_VALIDATOR_COST_USD,
+      model: GEMINI_VALIDATOR_MODEL,
+      provider: "gemini",
       rawText: message,
       result: buildRejectResult({
         failure: "gemini_validator_error",
@@ -311,15 +458,15 @@ async function runGeminiValidator(input: ValidateOutputInput): Promise<{
   }
 }
 
-async function runClaudeValidator(input: ValidateOutputInput): Promise<{
-  rawText: string;
-  result: ValidatorResult | null;
-}> {
+async function runClaudeValidator(input: ValidateOutputInput): Promise<ValidatorRun> {
   const apiKey = getKieApiKey();
 
   if (!apiKey) {
     return {
-      rawText: "KIE_API_KEY is required for Stage 2 validation.",
+      estimatedCostUsd: 0,
+      model: CLAUDE_VALIDATOR_MODEL,
+      provider: "claude",
+      rawText: "KIE_API_KEY is required for Claude validation.",
       result: null,
     };
   }
@@ -332,7 +479,7 @@ async function runClaudeValidator(input: ValidateOutputInput): Promise<{
           {
             content: [
               {
-                text: `${input.prompt}\n\nINPUT_IMAGE:`,
+                text: `${buildValidatorPrompt(input.prompt)}\n\nINPUT_IMAGE:`,
                 type: "text",
               },
               {
@@ -375,6 +522,9 @@ async function runClaudeValidator(input: ValidateOutputInput): Promise<{
 
     if (!response.ok) {
       return {
+        estimatedCostUsd: CLAUDE_VALIDATOR_COST_USD,
+        model: CLAUDE_VALIDATOR_MODEL,
+        provider: "claude",
         rawText: `KIE Claude validator failed (${response.status}): ${
           json.error?.message ?? json.msg ?? response.statusText
         }`,
@@ -390,25 +540,123 @@ async function runClaudeValidator(input: ValidateOutputInput): Promise<{
         .join("")
         .trim() ?? "";
 
-    if (!rawText) {
-      return {
-        rawText,
-        result: null,
-      };
-    }
-
-    const parsed = ValidatorResultSchema.safeParse(parseJsonResponse(rawText));
-
     return {
+      estimatedCostUsd: CLAUDE_VALIDATOR_COST_USD,
+      model: CLAUDE_VALIDATOR_MODEL,
+      provider: "claude",
       rawText,
-      result: parsed.success ? parsed.data : null,
+      result: rawText ? parseValidatorText(rawText) : null,
     };
   } catch (error) {
     return {
+      estimatedCostUsd: CLAUDE_VALIDATOR_COST_USD,
+      model: CLAUDE_VALIDATOR_MODEL,
+      provider: "claude",
       rawText: getErrorMessage(error),
       result: null,
     };
   }
+}
+
+function mergeValidatorRuns(runs: ValidatorRun[]) {
+  const parsedRuns = runs.filter(
+    (run): run is ValidatorRun & { result: ValidatorResult } =>
+      run.result !== null,
+  );
+
+  if (parsedRuns.length === 0) {
+    return buildRejectResult({
+      failure: "validator_parse_error",
+      notes: "No validator returned parseable JSON.",
+    });
+  }
+
+  const highConfidenceCriticalRejects = parsedRuns.filter(
+    (run) =>
+      run.result.overall_decision === "REJECT" &&
+      run.result.confidence >= HIGH_CONFIDENCE_FAILURE_THRESHOLD &&
+      hasIdentityCriticalFailure(run.result),
+  );
+
+  if (highConfidenceCriticalRejects.length > 0) {
+    return combineRejects(highConfidenceCriticalRejects, "high_confidence_identity_reject");
+  }
+
+  const rejectRuns = parsedRuns.filter(
+    (run) => run.result.overall_decision === "REJECT",
+  );
+
+  if (rejectRuns.length === parsedRuns.length) {
+    return combineRejects(rejectRuns, "validator_consensus_reject");
+  }
+
+  if (rejectRuns.length > 0) {
+    const acceptRun =
+      parsedRuns.find((run) => run.result.overall_decision === "ACCEPT") ??
+      parsedRuns.find((run) => run.result.overall_decision === "ACCEPT_WITH_WARNING") ??
+      parsedRuns[0];
+
+    return appendCriticalFailure(
+      {
+        ...acceptRun.result,
+        confidence: Math.min(acceptRun.result.confidence, 0.72),
+        lighting_state:
+          acceptRun.result.lighting_state === "FAIL" ? "FAIL" : "PASS",
+        overall_decision: "ACCEPT_WITH_WARNING",
+      },
+      "validator_disagreement_non_critical",
+    );
+  }
+
+  const warningRun = parsedRuns.find(
+    (run) => run.result.overall_decision === "ACCEPT_WITH_WARNING",
+  );
+
+  return warningRun?.result ?? parsedRuns[0].result;
+}
+
+function combineRejects(
+  runs: Array<ValidatorRun & { result: ValidatorResult }>,
+  failure: string,
+): ValidatorResult {
+  const representative = runs[0].result;
+  const failures = Array.from(
+    new Set([
+      failure,
+      ...runs.flatMap((run) => run.result.critical_failures),
+    ]),
+  );
+
+  return {
+    ...representative,
+    confidence: Math.max(...runs.map((run) => run.result.confidence)),
+    critical_failures: failures,
+    overall_decision: "REJECT",
+  };
+}
+
+function hasIdentityCriticalFailure(result: ValidatorResult) {
+  if (
+    result.room_proportions === "FAIL" ||
+    result.main_colors === "FAIL" ||
+    result.materials === "FAIL" ||
+    result.objects === "FAIL" ||
+    result.window_content === "FAIL"
+  ) {
+    return true;
+  }
+
+  return result.critical_failures.some((failure) =>
+    [
+      "creative_expansion",
+      "forbidden_material_hallucination",
+      "main_colors",
+      "materials",
+      "objects",
+      "room_proportions",
+      "window_content",
+    ].includes(failure),
+  );
 }
 
 function appendCriticalFailure(
@@ -417,7 +665,9 @@ function appendCriticalFailure(
 ): ValidatorResult {
   return {
     ...result,
-    critical_failures: Array.from(new Set([...result.critical_failures, failure])),
+    critical_failures: Array.from(
+      new Set([...result.critical_failures, failure]),
+    ),
   };
 }
 
@@ -445,6 +695,62 @@ function buildRejectResult({
     window_content: "FAIL",
     window_content_notes: notes,
   };
+}
+
+function buildValidatorPrompt(prompt: string) {
+  return [prompt, VALIDATOR_POLICY_INSERT].join("\n\n");
+}
+
+function parseValidatorText(rawText: string) {
+  if (!rawText) {
+    throw new Error("Validator did not return JSON text.");
+  }
+
+  const parsed = ValidatorResultSchema.safeParse(parseJsonResponse(rawText));
+
+  if (!parsed.success) {
+    throw new Error(`Validator returned invalid JSON: ${parsed.error.message}`);
+  }
+
+  return parsed.data;
+}
+
+function extractOpenAiText(json: OpenAiResponsesResponse) {
+  const outputText = json.output_text?.trim();
+
+  if (outputText) {
+    return outputText;
+  }
+
+  return (
+    json.output
+      ?.flatMap((output) => output.content ?? [])
+      .map((content) => content.text ?? "")
+      .join("")
+      .trim() ?? ""
+  );
+}
+
+function normalizePrimaryValidator(
+  value: string | undefined,
+): ImageValidatorProvider | null {
+  if (value === "gemini" || value === "openai") {
+    return value;
+  }
+
+  return null;
+}
+
+function resolvePrimaryValidator(): ImageValidatorProvider {
+  if (PRIMARY_IMAGE_VALIDATOR) {
+    if (PRIMARY_IMAGE_VALIDATOR === "openai" && !process.env.OPENAI_API_KEY) {
+      return "gemini";
+    }
+
+    return PRIMARY_IMAGE_VALIDATOR;
+  }
+
+  return process.env.OPENAI_API_KEY ? "openai" : "gemini";
 }
 
 function getKieApiKey() {

@@ -1,6 +1,10 @@
 import { AI_PROVIDERS } from "@interior-pro/shared";
 import { STORAGE_BUCKETS } from "@interior-pro/supabase";
-import { getKieTaskRecord, stabilizeVideoBytes } from "@interior-pro/pipeline";
+import {
+  getKieTaskRecord,
+  PIPELINE_MULTISHOT_STABILIZATION_ENABLED,
+  stabilizeVideoBytes,
+} from "@interior-pro/pipeline";
 import {
   KIE_CALLBACK_RECEIVED_EVENT,
   PROJECT_SUBMITTED_EVENT,
@@ -327,30 +331,45 @@ export const kieCallbackProcessor = inngest.createFunction(
         let clipBytes = new Uint8Array(await resultResponse.arrayBuffer());
         let stabilizationApplied = false;
         let stabilizationError: string | null = null;
+        const generationMode = stringFromRequest(
+          context.providerJob.request,
+          "generationMode",
+        );
+        const multiShotVariant = stringFromRequest(
+          context.providerJob.request,
+          "multiShotVariant",
+        );
 
-        try {
-          const stabilized = await stabilizeVideoBytes({
-            clipStorageKey,
-            videoBytes: clipBytes,
-          });
-          clipBytes = stabilized.videoBytes;
-          contentType = "video/mp4";
-          stabilizationApplied = stabilized.stabilized;
-        } catch (error) {
-          stabilizationError = getErrorMessage(error);
-          await writePipelineLog({
-            message:
-              "KIE callback clip stabilization failed; continuing with original clip.",
-            metadata: {
+        if (
+          PIPELINE_MULTISHOT_STABILIZATION_ENABLED &&
+          (generationMode === "multi_shot" || Boolean(multiShotVariant))
+        ) {
+          try {
+            const stabilized = await stabilizeVideoBytes({
               clipStorageKey,
-              error: stabilizationError,
-              providerJobId: context.providerJob.id,
-              taskId: data.taskId,
-            },
-            projectId: context.providerJob.project_id,
-            status: "info",
-            step: "video_generation",
-          });
+              videoBytes: clipBytes,
+            });
+            clipBytes = stabilized.videoBytes;
+            contentType = "video/mp4";
+            stabilizationApplied = stabilized.stabilized;
+          } catch (error) {
+            stabilizationError = getErrorMessage(error);
+            await writePipelineLog({
+              message:
+                "KIE callback multishot stabilization failed; continuing with original clip.",
+              metadata: {
+                clipStorageKey,
+                error: stabilizationError,
+                generationMode,
+                multiShotVariant,
+                providerJobId: context.providerJob.id,
+                taskId: data.taskId,
+              },
+              projectId: context.providerJob.project_id,
+              status: "info",
+              step: "video_generation",
+            });
+          }
         }
 
         const { error: uploadError } = await supabase.storage

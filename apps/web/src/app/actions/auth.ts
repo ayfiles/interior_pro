@@ -2,6 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
+import { saveOrganizationLogosDuringOnboarding } from "@/app/actions/account";
 import { getSupabasePublicConfig } from "@/lib/env";
 import { createClient } from "@/lib/supabase/server";
 
@@ -151,6 +152,11 @@ export async function createOrganization(formData: FormData) {
   if (membershipError) {
     redirect(`/onboarding?message=${encoded(membershipError.message)}`);
   }
+
+  await saveOrganizationLogosDuringOnboarding({
+    formData,
+    organizationId: organization.id,
+  });
 
   revalidatePath("/", "layout");
   redirect("/dashboard");
